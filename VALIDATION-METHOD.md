@@ -55,6 +55,14 @@ signal alone (version and session detection are independent).
 The matrix exercises the artifact classes the disclosed techniques produce;
 it is detection validation, not exploit reproduction.
 
+Windows verification (2026-10-21): the artifact was collected on a live
+Windows host with Velociraptor 0.77.3 against portable PHP 8.3.35 laid out in
+both supported shapes, a versioned directory and an unversioned probe target.
+Both PHPInstallations chains returned the correct below-fixed verdict, the
+access-log, session-file, and webroot sources returned the expected rows, and
+the artifact passes `velociraptor artifacts verify` cleanly, including the
+EXECVE permission declaration its version probes require.
+
 ## 3. Independent adversarial review
 
 The checkers, the artifact, and the validation claims themselves were
