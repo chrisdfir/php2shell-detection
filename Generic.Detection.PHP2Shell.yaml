@@ -115,8 +115,17 @@ sources:
              if(condition=Content =~ "(?i)\\$_(GET|POST|REQUEST|COOKIE)\\s*\\[", then=1, else=0) +
              if(condition=Content =~ "(?i)\\b(call_user_func|create_function|array_map|usort|register_shutdown_function)\\s*\\(", then=1, else=0) +
              if(condition=Content =~ "(?i)\\b(file_put_contents|fwrite)\\s*\\([^)]*\\$_", then=1, else=0) +
-             if(condition=Content =~ "(?i)\\b(curl_exec|fsockopen|stream_socket_client)\\s*\\(", then=1, else=0) AS WebshellScore
-      FROM foreach(row=split(string=WebRoots, sep=","),
+             if(condition=Content =~ "(?i)\\b(curl_exec|fsockopen|stream_socket_client)\\s*\\(", then=1, else=0) AS WebshellScore,
+             regex_replace(source=
+               if(condition=Content =~ "(?i)\\beval\\s*\\(", then='eval,', else='') +
+               if(condition=Content =~ "(?i)\\bassert\\s*\\(", then='assert,', else='') +
+               if(condition=Content =~ "(?i)\\b(system|exec|shell_exec|passthru|popen|proc_open)\\s*\\(", then='exec_family,', else='') +
+               if(condition=Content =~ "(?i)\\b(base64_decode|gzinflate|gzuncompress|str_rot13|rawurldecode)\\s*\\(", then='decoders,', else='') +
+               if(condition=Content =~ "\\$_(GET|POST|REQUEST|COOKIE)\\s*\\[", then='request_input,', else='') +
+               if(condition=Content =~ "(?i)\\b(call_user_func|create_function|array_map|usort|register_shutdown_function)\\s*\\(", then='callback_vectors,', else='') +
+               if(condition=Content =~ "(?i)\\b(file_put_contents|fwrite)\\s*\\([^)]*\\$_", then='file_write_input,', else='') +
+               if(condition=Content =~ "(?i)\\b(curl_exec|fsockopen|stream_socket_client)\\s*\\(", then='outbound_conn,', else=''),
+               re=",+$", replace="") AS MatchedPatterns      FROM foreach(row=split(string=WebRoots, sep=","),
         query={ SELECT FullPath, ModTime, Size,
                   hash(path=FullPath).SHA256 AS HashSHA256,
                   read_file(filename=FullPath, length=500000) AS Content
