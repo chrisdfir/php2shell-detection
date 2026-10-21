@@ -4,12 +4,18 @@ description: |
    Hunt for suspicious PHP-related process behavior, request markers,
    session-file content, possible webshells, and a PHP version inventory.
    Matches require investigation; they do not establish exploitation, a
-   particular CVE, or compromise. Version verdicts compare against a
+   particular CVE, or compromise. Version verdicts compare against an
    official fixed-version mapping (confirmed 2026-10-21 against the php.net
    advisory and php-src GHSA advisories); still re-verify against future
    advisories before acting on verdicts. Process results are a snapshot. File and log
    coverage depends on configured paths, permissions, retention, and the read
    limits below.
+
+reference:
+  - https://www.php.net/archive/2026.php
+  - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+  - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+  - https://github.com/cyb3r-monk/Threat-Hunting-and-Detection/blob/main/Uncategorized/PHP2Shell.md
 
 type: CLIENT
 
@@ -26,6 +32,9 @@ parameters:
   - name: SinceDate
     description: Include low-scoring PHP files modified after this UTC date; blank uses the last seven days
     default: ""
+  - name: ProcessCreatedAfter
+    description: Only report child processes created after this UTC date (newly-observed view); blank reports all matching children
+    default: ""
   - name: FixedVersions
     description: Official first-fixed-version per PHP branch (JSON), confirmed against the php.net advisory and php-src GHSA advisories 2026-10-21; re-verify against future advisories before acting on verdicts
     default: '{"8.2": "8.2.35", "8.3": "8.3.36", "8.4": "8.4.27", "8.5": "8.5.12"}'
@@ -34,9 +43,16 @@ sources:
   - name: ProcessBehavior
     query: |
       // Generic behavior: legitimate jobs can also launch these programs.
+      // ProcessCreatedAfter is the newly-observed view (cf. cyb3r-monk's
+      // PHP2Shell KQL first-seen approach): blank reports every matching
+      // child, a date limits results to processes created since then.
+      // Parent match includes versioned PHP binaries (php8.3, php-fpm8.3).
+      LET proc_cutoff <= if(condition=ProcessCreatedAfter,
+                            then=timestamp(string=ProcessCreatedAfter),
+                            else=timestamp(epoch=0))
       LET procs <= SELECT * FROM pslist()
       LET parents = SELECT Pid FROM procs
-      WHERE Name =~ "(?i)^(php(?:-fpm[0-9.]*)?|php-cgi|httpd|apache2?|nginx|w3wp)(?:\\.exe)?$"
+      WHERE Name =~ "(?i)^(php(?:[0-9.]*|-fpm[0-9.]*)?|php-cgi|httpd|apache2?|nginx|w3wp)(?:\\.exe)?$"
 
       SELECT Pid AS ChildPid, Ppid AS ParentPid,
              Name AS ChildName, CommandLine AS ChildCmdline,
@@ -44,6 +60,7 @@ sources:
              Username AS ChildUser
       FROM procs
       WHERE Ppid IN parents.Pid
+        AND CreateTime > proc_cutoff
         AND Name =~ "(?i)^(sh|bash|dash|zsh|python[0-9.]*|perl|php|nc|ncat|netcat|curl|wget|powershell|pwsh|cmd|certutil|bitsadmin|whoami|id|cat|chmod|chown|touch|tee)(?:\\.exe)?$"
 
   - name: AccessLogEvidence
@@ -59,6 +76,8 @@ sources:
         query={ SELECT LogFile, Line FROM parse_lines(filename=LogFile) })
       WHERE Line =~ "\\bPOST\\b"
         AND Line =~ "(?i)php2shell|PHP_SESSION_UPLOAD_PROGRESS"
+      // Cap so a chatty log cannot flood the collection; raise for deeper sweeps.
+      LIMIT 10000
 
   - name: SessionFileEvidence
     query: |
@@ -169,7 +188,7 @@ sources:
       // and "NOT NULL" is not reliably true in VQL - the compare path would
       // then run with a NULL threshold. Testing the value directly sends NULL
       // to the manual-review branch.
-      SELECT Binary, Version, Branch, Source, fixed[Branch] AS ProvisionalFixedVersion,
+      SELECT Binary, Version, Branch, Source, fixed[Branch] AS FixedVersion,
              if(condition=fixed[Branch],
                 then=if(condition=key(v=Version) < key(v=fixed[Branch]),
                         then="version below official fixed version - confirm against the vendor advisory",

@@ -147,7 +147,7 @@ foreach ($bin in $phpBins) {
         }
     }
     Write-Host ("[{0}] {1}  ->  {2}" -f $marker, $bin, $status) -ForegroundColor $color
-    $report.PhpVersions += [pscustomobject]@{ Binary = $bin; Version = $ver; Branch = $branch; ProvisionalFixed = $fixed; Status = $status }
+    $report.PhpVersions += [pscustomobject]@{ Binary = $bin; Version = $ver; Branch = $branch; FixedVersion = $fixed; Status = $status }
 }
 if (-not $phpBins) { Write-Host '[i] No PHP binary found on PATH or common locations - version inventory skipped.' }
 

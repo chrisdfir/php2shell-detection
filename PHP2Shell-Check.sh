@@ -295,7 +295,7 @@ for bin in "${php_bins[@]:-}"; do
         marker='ok'
     fi
     hit "[$marker] $bin  ->  $status"
-    php_json+=("{\"Binary\":\"$(json_escape "$bin")\",\"Version\":$(json_str "$ver"),\"Branch\":$(json_str "$branch"),\"ProvisionalFixed\":$(json_str "$fixed"),\"Status\":\"$(json_escape "$status")\"}")
+    php_json+=("{\"Binary\":\"$(json_escape "$bin")\",\"Version\":$(json_str "$ver"),\"Branch\":$(json_str "$branch"),\"FixedVersion\":$(json_str "$fixed"),\"Status\":\"$(json_escape "$status")\"}")
 done
 if ! (( ${#php_bins[@]} )); then
     info 'No PHP binary found on PATH or common locations - version inventory skipped.'
