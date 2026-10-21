@@ -84,10 +84,13 @@ and 2 are for.
 
 The php2shell advisories (CVE-2026-109618 / CVE-2026-109619) make the
 general point: the attacker's requests land on the same worker, and one
-confirmed shell means the whole fleet is a candidate. Sweep every PHP
-host with the same playbook, and while you have a box, look for
-second-stage persistence: cron entries, systemd units, SSH keys,
-web server config changes.
+confirmed shell means the whole fleet is a candidate. Researchers
+demonstrated pre-auth RCE against WordPress, Drupal, Joomla, MediaWiki,
+Roundcube, Magento, phpMyAdmin, Nextcloud, Laravel, Symfony and WHMCS;
+the flaw is in PHP itself, so any application on a vulnerable runtime
+is a candidate. Sweep every PHP host with the same playbook, and while
+you have a box, look for second-stage persistence: cron entries,
+systemd units, SSH keys, web server config changes.
 
 ## Practical sequence
 
