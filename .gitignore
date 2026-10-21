@@ -1,0 +1,19 @@
+*.zip
+*.log
+sample/
+# Terraform lab: local state and provider caches are disposable, never commit
+lab/aws-terraform/.terraform/
+lab/aws-terraform/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+.opencode-local/
+
+lab/
+tests/
+validation/
+.github/
+ANALYSIS.md
+VALIDATION.md
+_codex_*.md
