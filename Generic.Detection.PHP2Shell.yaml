@@ -30,11 +30,11 @@ parameters:
     description: Access log globs (comma-separated); markers must be present in logged fields
     default: "/var/log/apache2/*access*,/var/log/nginx/*access*,/var/log/httpd/*access*,C:/inetpub/logs/LogFiles/**/*.log"
   - name: SinceDate
+    type: timestamp
     description: Include low-scoring PHP files modified after this UTC date; blank uses the last seven days
-    default: ""
   - name: ProcessCreatedAfter
+    type: timestamp
     description: Only report child processes created after this UTC date (newly-observed view); blank reports all matching children
-    default: ""
   - name: FixedVersions
     description: Official first-fixed-version per PHP branch (JSON), confirmed against the php.net advisory and php-src GHSA advisories 2026-10-21; re-verify against future advisories before acting on verdicts
     default: '{"8.2": "8.2.35", "8.3": "8.3.36", "8.4": "8.4.27", "8.5": "8.5.12"}'
@@ -48,7 +48,7 @@ sources:
       // child, a date limits results to processes created since then.
       // Parent match includes versioned PHP binaries (php8.3, php-fpm8.3).
       LET proc_cutoff <= if(condition=ProcessCreatedAfter,
-                            then=timestamp(string=ProcessCreatedAfter),
+                            then=ProcessCreatedAfter,
                             else=timestamp(epoch=0))
       LET procs <= SELECT * FROM pslist()
       LET parents = SELECT Pid FROM procs
@@ -102,7 +102,7 @@ sources:
       // are scored on CONTENT first; the mtime window is a secondary signal.
       //   WebshellScore >= 2 = strong: multiple code-exec primitives
       //   WebshellScore <= 1 + recent mtime = weak: review manually
-      LET cutoff <= if(condition=SinceDate, then=timestamp(string=SinceDate),
+      LET cutoff <= if(condition=SinceDate, then=SinceDate,
                        else=timestamp(epoch=now() - 604800))
       SELECT FullPath, ModTime, Size, HashSHA256,
              if(condition=Content =~ "(?i)\\beval\\s*\\(", then=1, else=0) +
