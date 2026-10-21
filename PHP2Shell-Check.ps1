@@ -212,8 +212,13 @@ foreach ($root in $WebRoots | Where-Object { $_ } | Select-Object -Unique) {
             if ($content -match $p.Re) { $score++; $matched += $p.Name }
         }
         $recent = $_.LastWriteTimeUtc -gt $since
+        # Calibration (WordPress FP baseline, 2026-10-21): request_input +
+        # callback_vectors alone is idiomatic CMS code (74% of benign STRONG
+        # rows on WordPress core), so that exact pair demotes to WEAK. The
+        # classic eval($_POST[...]) shell keeps STRONG via eval,request_input.
+        $weakPair = $score -eq 2 -and @($matched) -contains 'request_input' -and @($matched) -contains 'callback_vectors' -and @($matched).Count -eq 2
         if ($score -ge 2 -or $recent) {
-            $strong = $score -ge 2
+            $strong = $score -ge 2 -and -not $weakPair
             $strength = if ($strong) { 'STRONG' } else { 'WEAK (heuristic: recent mtime only - review required)' }
             Write-Host ("[{0}] {1} (score={2} patterns={3}) {4}" -f $(if ($strong) { '!!' } else { '?' }), $_.FullName, $score, ($matched -join ','), $strength) -ForegroundColor $(if ($strong) { 'Red' } else { 'Yellow' })
             $report.WebshellHunt += [pscustomobject]@{

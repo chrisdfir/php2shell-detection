@@ -405,8 +405,16 @@ while IFS= read -r root; do
         (( grcW )) && add_error "content grep failed on: $f"
         m_epoch=$(stat -c %Y "$f" 2>/dev/null) || { m_epoch=""; add_error "stat failed on: $f"; }
         if [[ -n $m_epoch ]] && (( m_epoch > since_epoch )); then recent=1; else recent=0; fi
+        # Calibration (WordPress FP baseline, 2026-10-21): request_input +
+        # callback_vectors alone is idiomatic CMS code (74% of benign STRONG
+        # rows on WordPress core), so that exact pair demotes to WEAK. The
+        # classic eval($_POST[...]) shell keeps STRONG via eval,request_input.
+        weak_pair=0
+        if (( score == 2 )) && [[ ${matched[*]-} == 'request_input callback_vectors' || ${matched[*]-} == 'callback_vectors request_input' ]]; then
+            weak_pair=1
+        fi
         if (( score >= 2 || recent )); then
-            if (( score >= 2 )); then
+            if (( score >= 2 && ! weak_pair )); then
                 strong=1; tag='!!'; strength='STRONG'
             else
                 strong=0; tag='?'; strength='WEAK (heuristic: recent mtime only - review required)'

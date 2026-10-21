@@ -103,11 +103,15 @@ sources:
     query: |
       // Webshell hunt. mtime alone is noisy (deploys, plugin updates), so files
       // are scored on CONTENT first; the mtime window is a secondary signal.
-      //   WebshellScore >= 2 = strong: multiple code-exec primitives
-      //   WebshellScore <= 1 + recent mtime = weak: review manually
+      //   Signal = STRONG: multiple code-exec primitives, excluding the
+      //     request_input+callback_vectors pair alone (calibrated 2026-10-21
+      //     against a WordPress core baseline: 74% of benign STRONG rows were
+      //     exactly that pair; the classic eval($_POST[...]) shell keeps
+      //     STRONG via eval,request_input).
+      //   Signal = WEAK: everything else reported (recent mtime or low score).
       LET cutoff <= if(condition=SinceDate, then=SinceDate,
                        else=timestamp(epoch=now() - 604800))
-      SELECT FullPath, ModTime, Size, HashSHA256,
+      LET scored = SELECT FullPath, ModTime, Size, HashSHA256,
              if(condition=Content =~ "(?i)\\beval\\s*\\(", then=1, else=0) +
              if(condition=Content =~ "(?i)\\bassert\\s*\\(", then=1, else=0) +
              if(condition=Content =~ "(?i)\\b(system|exec|shell_exec|passthru|popen|proc_open)\\s*\\(", then=1, else=0) +
@@ -125,12 +129,17 @@ sources:
                if(condition=Content =~ "(?i)\\b(call_user_func|create_function|array_map|usort|register_shutdown_function)\\s*\\(", then='callback_vectors,', else='') +
                if(condition=Content =~ "(?i)\\b(file_put_contents|fwrite)\\s*\\([^)]*\\$_", then='file_write_input,', else='') +
                if(condition=Content =~ "(?i)\\b(curl_exec|fsockopen|stream_socket_client)\\s*\\(", then='outbound_conn,', else=''),
-               re=",+$", replace="") AS MatchedPatterns      FROM foreach(row=split(string=WebRoots, sep=","),
+               re=",+$", replace="") AS MatchedPatterns
+      FROM foreach(row=split(string=WebRoots, sep=","),
         query={ SELECT FullPath, ModTime, Size,
                   hash(path=FullPath).SHA256 AS HashSHA256,
                   read_file(filename=FullPath, length=500000) AS Content
                 FROM glob(globs=[_value + "/**/*.php"])
                 WHERE IsDir = FALSE })
+      SELECT *, if(condition=WebshellScore >= 2 AND MatchedPatterns != 'request_input,callback_vectors',
+                   then='STRONG',
+                   else='WEAK (heuristic: recent mtime only - review required)') AS Signal
+      FROM scored
       WHERE WebshellScore >= 2 OR ModTime > cutoff
 
   - name: PHPInstallations
