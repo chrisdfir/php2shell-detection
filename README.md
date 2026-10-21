@@ -10,14 +10,14 @@ Findings are leads for investigation, not confirmation of exploitation or attrib
 
 | File | Coverage |
 |---|---|
-| `PHP2Shell.Exposure.Triage.yaml` | Velociraptor artifact with process, access-log, session-file, and webroot hunts |
+| `Generic.Detection.PHP2Shell.yaml` | Velociraptor artifact with process, access-log, session-file, and webroot hunts |
 | `PHP2Shell-Check.ps1` | Standalone PowerShell session-file and webroot hunts |
 | `PHP2Shell-Check.sh` | Linux/bash counterpart of the PowerShell script (PHP version inventory, session-file and webroot hunts, known-good webroot diff) |
 | `POST-COMPROMISE.md` | What to look for, in order, when you already know a host was compromised |
 
 The platform regression suites used during validation are retained as validation tooling and described in [VALIDATION-METHOD.md](VALIDATION-METHOD.md); they are not part of this release tree.
 
-The Velociraptor artifact retains the name `PHP2Shell.Exposure.Triage` for import compatibility.
+The Velociraptor artifact is named `Generic.Detection.PHP2Shell`, following the artifact exchange naming convention.
 
 - **ProcessBehavior:** a snapshot of PHP/web-server processes with children such as shells, interpreters, and downloaders. Legitimate application activity can match; short-lived processes can be missed.
 - **AccessLogEvidence:** POST log lines containing `php2shell` or `PHP_SESSION_UPLOAD_PROGRESS`. These are literal markers, not an exploit signature. Standard access logs generally omit request bodies; changed or absent markers evade this hunt.
@@ -30,7 +30,7 @@ The Velociraptor artifact retains the name `PHP2Shell.Exposure.Triage` for impor
 Import the YAML into Velociraptor, or collect locally:
 
 ```text
-velociraptor --definitions . artifacts collect PHP2Shell.Exposure.Triage --output out.zip
+velociraptor --definitions . artifacts collect Generic.Detection.PHP2Shell --output out.zip
 ```
 
 Set `SessionPaths` and `WebRoots` to the actual directories in use (comma-separated in Velociraptor). Set `AccessLogGlobs` for custom access-log locations. `SinceDate` controls the low-scoring file modification window; blank defaults to the last seven days. Higher-scoring files are returned regardless of modification time.

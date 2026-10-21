@@ -47,7 +47,7 @@ PHP targets:
 The matrix asserts exit codes, version verdicts, strong/weak signals, and
 session-row counts for every container, plus a host-level run (a real
 below-fixed PHP on the lab host) and a Velociraptor collection of the
-`PHP2Shell.Exposure.Triage.yaml` artifact. Final state: **10/10 expected
+`Generic.Detection.PHP2Shell.yaml` artifact. Final state: **10/10 expected
 vs actual assertions passed**: vulnerable hosts flagged, patched hosts
 quiet, and patched hosts with session evidence flagged by the session
 signal alone (version and session detection are independent).

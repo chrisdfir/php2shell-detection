@@ -1,4 +1,4 @@
-name: PHP2Shell.Exposure.Triage
+name: Generic.Detection.PHP2Shell
 author: Chris DiSalle - @chrisdfir
 description: |
    Hunt for suspicious PHP-related process behavior, request markers,
