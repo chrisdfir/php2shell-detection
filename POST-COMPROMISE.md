@@ -58,7 +58,11 @@ scans cannot fake.
 
 Exploit attempts were observed from disclosure day (Cloudflare reported
 attack traffic and payload mutation against customers), so treat
-scanning as ongoing, not hypothetical.
+scanning as ongoing, not hypothetical. Do not judge risk by public
+exploit quality: the circulating proof-of-concept is unreliable and, in
+its author's own correction, memory-safety only rather than code
+execution, while the researcher chains behind the advisories achieve
+full unauthenticated RCE.
 
 ## 3. Scan file contents
 
