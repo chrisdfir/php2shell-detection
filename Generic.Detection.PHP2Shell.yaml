@@ -16,6 +16,7 @@ reference:
   - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
   - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
   - https://github.com/cyb3r-monk/Threat-Hunting-and-Detection/blob/main/Uncategorized/PHP2Shell.md
+  - https://docs.velociraptor.app/exchange/artifacts/pages/phpinventory/
 
 required_permissions:
   - EXECVE
@@ -157,27 +158,64 @@ sources:
                    atoi(string=split(string=v, sep_string=".")[2])
       LET fixed <= parse_json(data=FixedVersions)
 
-      // Linux: php on PATH. Full-token match: a suffix such as 8.3.36-dev or
-      // 8.3.36.1 must NOT truncate to a patched 8.3.36 verdict - capture the
-      // token and require exactly N.N.N, else the row is dropped here and the
-      // build is simply not version-asserted (assessment gap, not a verdict).
+      // Linux: php on PATH, plus filesystem discovery for stacks where php is
+      // NOT on PATH (cPanel, Plesk, Remi SCL, CloudLinux alt-php, LAMPP,
+      // Bitnami, manually compiled /usr/local builds). Glob list borrowed from
+      // Generic.Applications.PHPInventory (see reference). Full-token match: a
+      // suffix such as 8.3.36-dev or 8.3.36.1 must NOT truncate to a patched
+      // 8.3.36 verdict - capture the token and require exactly N.N.N, else the
+      // row is dropped here and the build is simply not version-asserted
+      // (assessment gap, not a verdict).
       LET linux_php = SELECT "php (PATH)" AS Binary, "probed" AS Source,
              parse_string_with_regex(string=Stdout,
                regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS Version
       FROM execve(argv=["php", "-v"], length=10000)
       WHERE Version
 
+      LET linux_raw = SELECT FullPath AS Binary,
+             parse_string_with_regex(string=FullPath,
+               regex="php[-/]?([0-8]\\.[0-9]+\\.[0-9]+)").g1 AS VersionFromPath
+      FROM glob(globs=[
+            "/usr/{bin,sbin}/php*", "/usr/local/{bin,sbin}/php*",
+            "/usr/local/php*/{bin,sbin}/php*",
+            "/opt/remi/php*/root/usr/{bin,sbin}/php*",
+            "/opt/plesk/php/*/{bin,sbin}/php*",
+            "/opt/cpanel/ea-php*/root/usr/{bin,sbin}/php*",
+            "/opt/alt/php*/usr/{bin,sbin}/php*",
+            "/opt/lampp/{bin,sbin}/php*",
+            "/opt/bitnami/php/{bin,sbin}/php*"])
+      WHERE NOT IsDir
+
+      LET linux_versioned = SELECT Binary, VersionFromPath AS Version,
+             "path-derived (unverified)" AS Source
+      FROM linux_raw WHERE VersionFromPath
+
+      LET linux_exec = SELECT Binary,
+             parse_string_with_regex(string=Stdout,
+               regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS Version,
+             "probed" AS Source
+      FROM foreach(row={ SELECT Binary FROM linux_raw WHERE NOT VersionFromPath },
+        query={ SELECT Binary, Stdout FROM execve(argv=[Binary, "-v"], length=10000) })
+      WHERE Version
+
       // Windows: versioned install directories (C:\php\8.3.9\, MSI layout
       // C:\Program Files\php\8.3.9\, php-8.3.9, php8.3.9) get their version
       // from the path; unversioned directories (C:\php\php.exe, xampp) need
-      // execve -v. BOTH kinds must reach the results below.
+      // execve -v. BOTH kinds must reach the results below. Layout list also
+      // borrowed from Generic.Applications.PHPInventory (x86 PHP, Laragon,
+      // Plesk, C:\php* style dirs); C:\inetpub kept for IIS layouts.
       LET win_raw = SELECT FullPath AS Binary,
             parse_string_with_regex(string=FullPath,
               regex="php[-\\\\/]?([0-8]\\.[0-9]+\\.[0-9]+)").g1 AS VersionFromPath
       FROM glob(globs=[
-            "C:\\php\\**\\php.exe", "C:\\Program Files\\php\\**\\php.exe",
-            "C:\\Program Files\\PHP\\**\\php.exe", "C:\\xampp\\php\\php.exe",
-            "C:\\wamp*\\bin\\php\\**\\php.exe", "C:\\inetpub\\**\\php.exe"])
+            "C:\\php\\**\\php.exe", "C:\\php*\\php.exe",
+            "C:\\Program Files\\php\\**\\php.exe",
+            "C:\\Program Files\\PHP\\**\\php.exe",
+            "C:\\Program Files (x86)\\PHP*\\**\\php.exe",
+            "C:\\xampp\\php\\php.exe", "C:\\wamp*\\bin\\php\\**\\php.exe",
+            "C:\\laragon\\bin\\php\\**\\php.exe",
+            "C:\\Program Files (x86)\\Plesk\\Additional\\PHP*\\**\\php.exe",
+            "C:\\inetpub\\**\\php.exe"])
       WHERE NOT IsDir
 
       // Path-derived versions trust the directory name: they are UNVERIFIED
@@ -197,7 +235,7 @@ sources:
       WHERE Version
 
       // Versioned-path rows and execve rows flow into the same result set.
-      LET all_versions = SELECT Binary, Version, Source FROM chain(a=linux_php, b=win_versioned, c=win_exec)
+      LET all_versions = SELECT Binary, Version, Source FROM chain(a=linux_php, b=linux_versioned, c=linux_exec, d=win_versioned, e=win_exec)
       GROUP BY Binary, Version, Source
 
       LET branched = SELECT Binary, Version, Source,
