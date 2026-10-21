@@ -27,9 +27,21 @@ fixtures and stub `php` binaries. Between them they assert, per platform:
   chained into the result set, numeric `key()` comparison, official
   fixed-version mapping confirmed against the php.net advisory).
 
-Final state: bash 31/31 passed; PowerShell 29 passed, 0 failed (one
+Final state: bash 32/32 passed; PowerShell 30 passed, 0 failed (one
 environment-dependent YAML-parse check reports an explicit skip when no
 parser module is installed).
+
+## 4. False-positive calibration (WordPress core baseline)
+
+The webroot scoring was calibrated against a real codebase: wordpress.org
+latest (1,512 PHP files) scored by the artifact on AWS. Before calibration,
+66 files (4.4%) reported STRONG, 74% of them the single pair
+request_input+callback_vectors - idiomatic CMS code, not shell indicators.
+After calibration (that exact pair alone demotes to WEAK; the classic
+eval($_POST[...]) shell keeps STRONG via eval,request_input), WordPress core
+yields 17 STRONG rows (1.1%). The rule, its rationale, and the Signal column
+are identical in both checkers and the artifact; the demoted rows are still
+reported, just not exit-code-driving.
 
 ## 2. Isolated cloud lab (end-to-end A/B matrix)
 

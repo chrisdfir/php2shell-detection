@@ -62,7 +62,7 @@ stdout so it can be piped to a file):
 ./PHP2Shell-Check.sh -w /var/www/html -d /clean-copy-of-webroot
 ```
 
-The script prints findings and a JSON report including scanned and missing directories and scan errors. Exit codes:
+The script prints findings and a JSON report including scanned and missing directories and scan errors. A score >= 2 webroot finding drives exit 1 unless the only matched patterns are request_input and callback_vectors - that pair alone is idiomatic CMS code (calibrated against a WordPress core baseline: 74% of benign strong rows), so it reports as a weak lead instead. Exit codes:
 
 | Code | Meaning |
 |---|---|
