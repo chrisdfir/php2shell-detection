@@ -42,6 +42,14 @@ parameters:
   - name: FixedVersions
     description: Official first-fixed-version per PHP branch (JSON), confirmed against the php.net advisory and php-src GHSA advisories 2026-10-21; re-verify against future advisories before acting on verdicts
     default: '{"8.2": "8.2.35", "8.3": "8.3.36", "8.4": "8.4.27", "8.5": "8.5.12"}'
+  - name: AdditionalBinaryGlobs
+    type: multiline
+    description: Extra absolute glob patterns for PHP binaries, one per line. Entries must still match the runtime-name allowlist in PHPInstallations. Use for local layouts not covered by the defaults (MAMP/Bitnami Windows, FreeBSD, custom prefixes).
+    default: ''
+  - name: EnableProbing
+    type: bool
+    description: When enabled (default), discovered binaries are executed with -n -v to read the authoritative version and issue verdicts. When disabled the source is discovery-only and reports no version verdicts.
+    default: "Y"
 
 sources:
   - name: ProcessBehavior
@@ -147,35 +155,63 @@ sources:
     query: |
       // Version inventory only. Whether a build is affected by any specific
       // vulnerability depends on the vendor advisory; FixedVersions above is
-      // official (confirmed 2026-10-21, see README) and verdicts here are leads, not confirmations.
+      // official (confirmed 2026-10-21, see README) and verdicts here are
+      // leads, not confirmations.
       //
       // Comparison is NUMERIC and component-wise. A string comparison is wrong
-      // here: "8.3.9" sorts lexicographically after "8.3.36" and would report a
-      // vulnerable build as patched. key() maps a.b.c to a*1000000 + b*1000 + c
-      // (PHP branches have single-digit major/minor and patch < 1000).
+      // here: "8.3.9" sorts lexicographically after "8.3.36" and would report
+      // a vulnerable build as patched. key() maps a.b.c to a*1000000 + b*1000
+      // + c (PHP branches have single-digit major/minor and patch < 1000).
+      //
+      // Discovery layouts adapted from Generic.Applications.PHPInventory
+      // (Matt Green, see reference). Boundaries: no macOS/FreeBSD support and
+      // no container discovery; uncovered layouts (MAMP/Bitnami Windows,
+      // custom prefixes) go through AdditionalBinaryGlobs.
+      //
+      // Evidence policy: the directory name is a HINT, the binary is the
+      // evidence. Every discovered runtime is probed (-n -v, no php.ini
+      // loading); the probed version drives any verdict. A path-derived
+      // version is reported only as an unverified hint (PathHint) and never
+      // issues an affirmative verdict; path/binary disagreement is flagged.
       LET key(v) = atoi(string=split(string=v, sep_string=".")[0]) * 1000000 +
                    atoi(string=split(string=v, sep_string=".")[1]) * 1000 +
                    atoi(string=split(string=v, sep_string=".")[2])
       LET fixed <= parse_json(data=FixedVersions)
 
-      // Linux: php on PATH, plus filesystem discovery for stacks where php is
-      // NOT on PATH (cPanel, Plesk, Remi SCL, CloudLinux alt-php, LAMPP,
-      // Bitnami, manually compiled /usr/local builds). Glob list borrowed from
-      // Generic.Applications.PHPInventory (see reference). Full-token match: a
-      // suffix such as 8.3.36-dev or 8.3.36.1 must NOT truncate to a patched
-      // 8.3.36 verdict - capture the token and require exactly N.N.N, else the
-      // row is dropped here and the build is simply not version-asserted
-      // (assessment gap, not a verdict).
-      LET linux_php = SELECT "php (PATH)" AS Binary, "probed" AS Source,
-             parse_string_with_regex(string=Stdout,
-               regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS Version
-      FROM execve(argv=["php", "-v"], length=10000)
-      WHERE Version
+      // OS gate: the PATH probe executes php and must not run on Windows;
+      // the glob lists are harmless cross-OS but gated for clarity.
+      LET on_windows <= environ(var="OS") = "Windows_NT"
 
-      LET linux_raw = SELECT FullPath AS Binary,
+      // Runtime-name allowlist on the BASENAME: PHP CLI/CGI/FPM/debug
+      // binaries and their versioned variants (php, php83, php8.3, php-cgi,
+      // php-fpm8.3, phpdbg, ... .exe). Deliberately excludes phpize,
+      // php-config and anything else that merely starts with "php":
+      // EXECVE authorizes execution, it does not make every php* file safe
+      // to run.
+      LET is_runtime(name) = name =~ "^(?i)php(?:[0-9]+(?:\\.[0-9]+)*)?(?:-?(?:cgi|fpm|dbg))?(?:[0-9]+(?:\\.[0-9]+)*)?(?:\\.exe)?$"
+
+      // Version token from the path: capture the FULL token following
+      // php[-/], then require exactly N.N.N. A directory such as
+      // php8.3.36-dev or php8.3.36.1 yields a token that FAILS validation,
+      // so that install is probed instead of path-asserted - a prerelease
+      // suffix must never truncate to a patched 8.3.36 verdict.
+      LET valid_version(tok) = tok =~ "^[0-8]\\.[0-9]+\\.[0-9]+$"
+
+      // Extra user globs (one per line, trimmed).
+      LET extra_globs <= filter(list=split(string=AdditionalBinaryGlobs, sep_string="\n"),
+                                condition="x=>x AND trim(string=x) != ''")
+
+      // Discovery is materialized once (<=) and deduplicated (GROUP BY):
+      // overlapping globs (C:\php\**5 and C:\php*\... etc.) must not cause
+      // duplicate probes. Glob notes (VQL docs): patterns are CASE
+      // INSENSITIVE (no php/PHP duplicate needed) and bare ** recurses only
+      // 3 levels deep - explicit depths (**5) are used where trees can be
+      // deeper.
+      LET nix_raw <= SELECT FullPath AS Binary, Name AS BinName,
              parse_string_with_regex(string=FullPath,
-               regex="php[-/]?([0-8]\\.[0-9]+\\.[0-9]+)").g1 AS VersionFromPath
-      FROM glob(globs=[
+               regex="php[-/]?([0-9][0-9.a-zA-Z-]*)").g1 AS PathToken
+      FROM chain(
+            a={ SELECT FullPath, Name, IsDir FROM glob(globs=[
             "/usr/{bin,sbin}/php*", "/usr/local/{bin,sbin}/php*",
             "/usr/local/php*/{bin,sbin}/php*",
             "/opt/remi/php*/root/usr/{bin,sbin}/php*",
@@ -183,75 +219,92 @@ sources:
             "/opt/cpanel/ea-php*/root/usr/{bin,sbin}/php*",
             "/opt/alt/php*/usr/{bin,sbin}/php*",
             "/opt/lampp/{bin,sbin}/php*",
-            "/opt/bitnami/php/{bin,sbin}/php*"])
-      WHERE NOT IsDir
+            "/opt/bitnami/php/{bin,sbin}/php*"]) },
+            b={ SELECT * FROM if(condition=len(list=extra_globs) > 0,
+                    then={ SELECT FullPath, Name, IsDir FROM glob(globs=extra_globs) },
+                    else={ SELECT '' AS FullPath, '' AS Name, FALSE AS IsDir FROM scope() WHERE FALSE }) })
+      WHERE NOT IsDir AND is_runtime(name=Name)
+      GROUP BY Binary
 
-      LET linux_versioned = SELECT Binary, VersionFromPath AS Version,
-             "path-derived (unverified)" AS Source
-      FROM linux_raw WHERE VersionFromPath
+      LET win_raw <= SELECT FullPath AS Binary, Name AS BinName,
+             parse_string_with_regex(string=FullPath,
+               regex="php[-\\/]?([0-9][0-9.a-zA-Z-]*)").g1 AS PathToken
+      FROM chain(
+            a={ SELECT FullPath, Name, IsDir FROM glob(globs=[
+            "C:\\php\\**5\\php*.exe", "C:\\php*\\php*.exe",
+            "C:\\Program Files\\php\\**5\\php*.exe",
+            "C:\\Program Files (x86)\\PHP*\\**5\\php*.exe",
+            "C:\\Program Files\\Plesk\\Additional\\PHP*\\**5\\php*.exe",
+            "C:\\Program Files (x86)\\Plesk\\Additional\\PHP*\\**5\\php*.exe",
+            "C:\\xampp\\php\\php*.exe", "C:\\wamp*\\bin\\php\\**5\\php*.exe",
+            "C:\\laragon\\bin\\php\\**5\\php*.exe",
+            "C:\\inetpub\\**5\\php*.exe"]) },
+            b={ SELECT * FROM if(condition=len(list=extra_globs) > 0,
+                    then={ SELECT FullPath, Name, IsDir FROM glob(globs=extra_globs) },
+                    else={ SELECT '' AS FullPath, '' AS Name, FALSE AS IsDir FROM scope() WHERE FALSE }) })
+      WHERE NOT IsDir AND is_runtime(name=Name)
+      GROUP BY Binary
 
-      LET linux_exec = SELECT Binary,
+      // Path tokens that validate exactly become unverified hints.
+      LET nix_candidates <= SELECT Binary,
+             if(condition=valid_version(tok=PathToken), then=PathToken, else=NULL) AS PathVersion
+      FROM nix_raw
+      LET win_candidates <= SELECT Binary,
+             if(condition=valid_version(tok=PathToken), then=PathToken, else=NULL) AS PathVersion
+      FROM win_raw
+
+      LET all_candidates <= SELECT Binary, PathVersion FROM chain(a=nix_candidates, b=win_candidates)
+
+      // Probe EVERY discovered runtime (not only path-unversioned ones):
+      // the inner query carries PathVersion through the probe, and execve
+      // emits a row even when the probe fails, so every candidate reports -
+      // failed probes become unverified, never silently dropped. Bound: at
+      // most 100 execve calls per collection.
+      LET probe_input <= SELECT Binary, PathVersion FROM all_candidates LIMIT 100
+
+      LET assessed = SELECT Binary, PathVersion, ObservedVersion FROM if(condition=EnableProbing,
+              then={ SELECT Binary, PathVersion,
+                       parse_string_with_regex(string=Stdout,
+                         regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion
+                     FROM foreach(row=probe_input,
+                       query={ SELECT Binary, PathVersion, Stdout FROM execve(argv=[Binary, "-n", "-v"], length=10000) }) },
+              else={ SELECT Binary, PathVersion, NULL AS ObservedVersion FROM probe_input })
+
+      // PATH probe (POSIX only): catches php even when no glob layout
+      // matches; skipped on Windows and in discovery-only mode. The label
+      // records provenance; it may duplicate a glob-discovered install
+      // (distinct row, distinct provenance).
+      LET skip_path_probe <= on_windows OR NOT EnableProbing
+      LET path_probe <= SELECT "php (PATH)" AS Binary, NULL AS PathVersion,
              parse_string_with_regex(string=Stdout,
-               regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS Version,
-             "probed" AS Source
-      FROM foreach(row={ SELECT Binary FROM linux_raw WHERE NOT VersionFromPath },
-        query={ SELECT Binary, Stdout FROM execve(argv=[Binary, "-v"], length=10000) })
-      WHERE Version
+               regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion
+      FROM if(condition=skip_path_probe,
+              then={ SELECT '' AS Binary FROM scope() WHERE FALSE },
+              else={ SELECT Stdout FROM execve(argv=["php", "-n", "-v"], length=10000) })
+      WHERE ObservedVersion
 
-      // Windows: versioned install directories (C:\php\8.3.9\, MSI layout
-      // C:\Program Files\php\8.3.9\, php-8.3.9, php8.3.9) get their version
-      // from the path; unversioned directories (C:\php\php.exe, xampp) need
-      // execve -v. BOTH kinds must reach the results below. Layout list also
-      // borrowed from Generic.Applications.PHPInventory (x86 PHP, Laragon,
-      // Plesk, C:\php* style dirs); C:\inetpub kept for IIS layouts.
-      LET win_raw = SELECT FullPath AS Binary,
-            parse_string_with_regex(string=FullPath,
-              regex="php[-\\\\/]?([0-8]\\.[0-9]+\\.[0-9]+)").g1 AS VersionFromPath
-      FROM glob(globs=[
-            "C:\\php\\**\\php.exe", "C:\\php*\\php.exe",
-            "C:\\Program Files\\php\\**\\php.exe",
-            "C:\\Program Files\\PHP\\**\\php.exe",
-            "C:\\Program Files (x86)\\PHP*\\**\\php.exe",
-            "C:\\xampp\\php\\php.exe", "C:\\wamp*\\bin\\php\\**\\php.exe",
-            "C:\\laragon\\bin\\php\\**\\php.exe",
-            "C:\\Program Files (x86)\\Plesk\\Additional\\PHP*\\**\\php.exe",
-            "C:\\inetpub\\**\\php.exe"])
-      WHERE NOT IsDir
+      LET assessed2 = SELECT Binary, PathVersion, ObservedVersion,
+             if(condition=ObservedVersion,
+                then=split(string=ObservedVersion, sep_string=".")[0] + "." +
+                     split(string=ObservedVersion, sep_string=".")[1],
+                else=NULL) AS Branch
+      FROM chain(a=path_probe, b=assessed)
 
-      // Path-derived versions trust the directory name: they are UNVERIFIED
-      // until corroborated (prerelease directory names can look patched).
-      LET win_versioned = SELECT Binary, VersionFromPath AS Version,
-             "path-derived (unverified)" AS Source
-      FROM win_raw WHERE VersionFromPath
-
-      LET win_unversioned = SELECT Binary FROM win_raw WHERE NOT VersionFromPath
-
-      LET win_exec = SELECT Binary,
-             parse_string_with_regex(string=Stdout,
-               regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS Version,
-             "probed" AS Source
-      FROM foreach(row=win_unversioned,
-        query={ SELECT Binary, Stdout FROM execve(argv=[Binary, "-v"], length=10000) })
-      WHERE Version
-
-      // Versioned-path rows and execve rows flow into the same result set.
-      LET all_versions = SELECT Binary, Version, Source FROM chain(a=linux_php, b=linux_versioned, c=linux_exec, d=win_versioned, e=win_exec)
-      GROUP BY Binary, Version, Source
-
-      LET branched = SELECT Binary, Version, Source,
-             split(string=Version, sep_string=".")[0] + "." +
-             split(string=Version, sep_string=".")[1] AS Branch
-      FROM all_versions
-
-      // Positive condition on fixed[Branch]: an unknown branch yields NULL,
-      // and "NOT NULL" is not reliably true in VQL - the compare path would
-      // then run with a NULL threshold. Testing the value directly sends NULL
-      // to the manual-review branch.
-      SELECT Binary, Version, Branch, Source, fixed[Branch] AS FixedVersion,
-             if(condition=fixed[Branch],
-                then=if(condition=key(v=Version) < key(v=fixed[Branch]),
-                        then="version below official fixed version - confirm against the vendor advisory",
-                        else="version at or above official fixed version"),
-                else="no official fixed version for this branch - manual review") AS Status
-      FROM branched
-
+      SELECT Binary,
+        if(condition=ObservedVersion, then=ObservedVersion, else=PathVersion) AS Version,
+        if(condition=ObservedVersion, then="probed",
+           else=if(condition=PathVersion, then="path-derived (unverified)",
+                   else="unverified")) AS Source,
+        PathVersion AS PathHint,
+        if(condition=ObservedVersion AND PathVersion AND ObservedVersion != PathVersion,
+           then="path/binary version disagreement - probed value used", else="") AS Note,
+        if(condition=ObservedVersion,
+           then=if(condition=fixed[Branch],
+                   then=if(condition=key(v=ObservedVersion) < key(v=fixed[Branch]),
+                           then="version below official fixed version - confirm against the vendor advisory",
+                           else="version at or above official fixed version"),
+                   else="no official fixed version for this branch - manual review"),
+           else=if(condition=PathVersion,
+                   then="path-derived version unverified - manual review",
+                   else="version could not be determined - manual review")) AS Status
+      FROM assessed2
