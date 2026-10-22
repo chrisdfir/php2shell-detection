@@ -75,17 +75,53 @@ access-log, session-file, and webroot sources returned the expected rows, and
 the artifact passes `velociraptor artifacts verify` cleanly, including the
 EXECVE permission declaration its version probes require.
 
-Real-traffic validation (2026-10-22): the public proof-of-concept lab
+Real-request/log validation (2026-10-22): the public proof-of-concept lab
 (ikow/php2shell-poc: PHP-FPM 8.2.35 behind nginx, Apache mod_php 8.2.35 with
-a 32M memory limit) was driven with genuine exploit requests. The Apache
-chain produced the documented worker-crash signature, and the FPM chain
-produced a genuine `Allowed memory size ... exhausted` fatal written by the
-real FPM worker to its configured error-log file; a
+a 32M memory limit) was driven with genuine exploit-shaped requests. This is
+request-and-log validation, not exploit reproduction: the builds used are
+themselves patched (8.2.35), and the memory exhaustion is nonspecific, so
+nothing here demonstrates successful exploitation of the CVEs. What it does
+establish: the Apache chain produced the documented worker-crash signature,
+the FPM chain produced a genuine `Allowed memory size ... exhausted` fatal
+written by the real FPM worker to its configured error-log file, and a
 `Generic.Detection.PHP2Shell/FpmErrorLogEvidence` collection over that file
-returned exactly that line with `PossiblyTruncated=false`. The Windows host
-additionally passed a 16-check matrix covering every source, the probe
-budget (threshold, over-budget, discovery-only), and path-hint extraction
-on versioned Windows layouts.
+returned exactly that line with `PossiblyTruncated=false`. A 10001-match
+fixture confirmed the cap semantics: exactly 10000 rows returned with
+`PossiblyTruncated=true`. The Windows host additionally passed a 16-check
+matrix covering every source, the probe budget (threshold, over-budget,
+discovery-only), and path-hint extraction on versioned Windows layouts.
+
+### Final artifact record
+
+The submitted artifact is `Generic.Detection.PHP2Shell.yaml` at commit
+`b8aab48`, SHA-256
+`685A8AA77CD621FCCEEBEB5BAC63E2B402F79B2CFCF168FD79EA944661583266`
+(byte-identical to the tree at commit `3869633`; `b8aab48` changed only
+this document). All results below were produced against exactly this file:
+
+- Linux matrix, AWS AL2023 workbench (SSM only), Velociraptor 0.77.3:
+  35/35 checks - negatives, malformed inputs, session-marker splits, log
+  rotation/gz/cap, probe budget at the exact threshold (MaxProbes=124
+  against 123 candidates), over-budget (MaxProbes=2), default-budget
+  over-budget, nonzero-exit no-verdict, branch-mismatched fixed values.
+- Windows Server 2022 (SSM only), Velociraptor 0.77.3: 16/16 checks -
+  every source, budget and discovery-only modes, PathHint extraction, no
+  PATH probe on Windows; plus the live ProcessCreatedAfter assertions
+  (past cutoff reports a real php.exe parent/child pair, future cutoff
+  returns zero rows, MatchesToolAllowlist classification present).
+- A/B end-to-end (ephemeral instance, 8 containers: 8.3.35/8.3.36 x
+  apache/fpm x cleanup on/off): results recorded in
+  `results/ab-final-report.txt` in the evidence bucket.
+- Regression suites: bash 32/32; PowerShell 33 passed, 1 explicit
+  environmental skip (YAML-parse check without a parser module; the
+  artifact is parsed by the bash suite and by `velociraptor artifacts
+  verify` on every run).
+- Evidence: `s3://php2shell-evidence-d63bfbc3bcb9ee837200948705/` under
+  `2026-10-22/7cddbcb/` (development-round collections) and
+  `2026-10-22/3869633/` (final-round collections including the real FPM
+  error log, the truncation-test collection, and the artifact hash).
+  `7cddbcb` and `3869633` are successive commits of the same campaign;
+  the final-round prefix holds the evidence for the hash above.
 
 ## 3. Independent adversarial review
 
