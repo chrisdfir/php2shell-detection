@@ -110,9 +110,19 @@ this document). All results below were produced against exactly this file:
   (past cutoff reports a real php.exe parent/child pair, future cutoff
   returns zero rows, MatchesToolAllowlist classification present).
 - A/B end-to-end (ephemeral instance, 8 containers: 8.3.35/8.3.36 x
-  apache/fpm x cleanup on/off): results recorded in
-  `results/ab-final-report.txt` in the evidence bucket.
-- Regression suites: bash 32/32; PowerShell 33 passed, 1 explicit
+  apache/fpm x cleanup on/off): the artifact collected inside every
+  container - 32/32 checks (version verdicts, webshell differentiation,
+  session evidence per cleanup flag, real OOM fatals from every
+  container's own error log); results in `results/ab-final-report.txt`
+  in the evidence bucket. The bash checker ran the same matrix:
+  10/10 expected-vs-actual (`results/validation-report.txt`).
+- Live Windows checker run: `PHP2Shell-Check.ps1` against the real host
+  PHP 8.3.35 exits 1 with "below official fixed version 8.3.36" for
+  both discovered binaries. This live run caught a discovery gap (the
+  shallow `C:\php*\php.exe` pattern misses the standard versioned
+  subdirectory layout `C:\php\<version>\php.exe`); fixed and covered by
+  a suite check.
+- Regression suites: bash 32/32; PowerShell 34 passed, 1 explicit
   environmental skip (YAML-parse check without a parser module; the
   artifact is parsed by the bash suite and by `velociraptor artifacts
   verify` on every run).

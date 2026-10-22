@@ -94,7 +94,7 @@ if ($PhpBins -and @($PhpBins).Count -gt 0) {
 } else {
     $cmd = Get-Command php -ErrorAction SilentlyContinue
     if ($cmd) { $resolvedBins += $cmd.Source }
-    foreach ($pat in 'C:\php*\php.exe', 'C:\Program Files\php*\php.exe', 'C:\Program Files\PHP\*\php.exe', 'C:\xampp\php\php.exe', 'C:\wamp*\bin\php\php*\php.exe') {
+    foreach ($pat in 'C:\php*\php.exe', 'C:\php\*\php.exe', 'C:\Program Files\php*\php.exe', 'C:\Program Files\PHP\*\php.exe', 'C:\xampp\php\php.exe', 'C:\wamp*\bin\php\php*\php.exe') {
         $resolvedBins += (Get-ChildItem $pat -File -ErrorAction SilentlyContinue).FullName
     }
 }
