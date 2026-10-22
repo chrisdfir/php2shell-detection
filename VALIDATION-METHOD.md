@@ -75,6 +75,18 @@ access-log, session-file, and webroot sources returned the expected rows, and
 the artifact passes `velociraptor artifacts verify` cleanly, including the
 EXECVE permission declaration its version probes require.
 
+Real-traffic validation (2026-10-22): the public proof-of-concept lab
+(ikow/php2shell-poc: PHP-FPM 8.2.35 behind nginx, Apache mod_php 8.2.35 with
+a 32M memory limit) was driven with genuine exploit requests. The Apache
+chain produced the documented worker-crash signature, and the FPM chain
+produced a genuine `Allowed memory size ... exhausted` fatal written by the
+real FPM worker to its configured error-log file; a
+`Generic.Detection.PHP2Shell/FpmErrorLogEvidence` collection over that file
+returned exactly that line with `PossiblyTruncated=false`. The Windows host
+additionally passed a 16-check matrix covering every source, the probe
+budget (threshold, over-budget, discovery-only), and path-hint extraction
+on versioned Windows layouts.
+
 ## 3. Independent adversarial review
 
 The checkers, the artifact, and the validation claims themselves were
