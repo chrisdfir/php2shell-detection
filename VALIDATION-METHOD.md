@@ -119,11 +119,13 @@ the fix without bumping the upstream version (confirm via package
 changelog); artifact content reads are capped (1 MB per session file,
 500 KB per PHP file); error-log and access-log scans skip compressed
 files and cap output at 10000 lines, so one very chatty log can crowd out
-other files in the same collection; the version probe runs `php -n -v`
-with no per-probe timeout (collection-level resource limits apply); and
-the bash checker's guaranteed-valid JSON output assumes `iconv` is
-installed. The known-good webroot diff and POST-COMPROMISE.md were added
-after the lab validation and are covered by the regression suites only.
-Container-internal PHP runtimes, macOS and FreeBSD hosts, and real
-cPanel/Plesk/Remi servers are outside validated coverage; the
-`AdditionalBinaryGlobs` parameter exists for such layouts.
+other files in the same collection, and the cap does not bound bytes
+scanned (a very large log with few matches is read in full); the version
+probe runs `php -n -v` with no per-process timeout (VQL execve offers
+none - collection-level resource limits apply, and a hanging binary would
+stall the probe step); and the bash checker's guaranteed-valid JSON output
+assumes `iconv` is installed. The known-good webroot diff and
+POST-COMPROMISE.md were added after the lab validation and are covered by
+the regression suites only. Container-internal PHP runtimes, macOS and
+FreeBSD hosts, and real cPanel/Plesk/Remi servers are outside validated
+coverage; the `AdditionalBinaryGlobs` parameter exists for such layouts.

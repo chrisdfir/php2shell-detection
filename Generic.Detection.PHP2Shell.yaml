@@ -40,8 +40,8 @@ parameters:
     description: Access log globs (comma-separated); markers must be present in logged fields
     default: "/var/log/apache2/*access*,/var/log/nginx/*access*,/var/log/httpd/*access*,C:/inetpub/logs/LogFiles/**/*.log"
   - name: ErrorLogGlobs
-    description: FPM/PHP error-log globs (comma-separated) scanned for Allowed-memory-size fatal errors, the footprint of the php2shell trigger. Compressed logs (.gz etc.) are skipped; point at decompressed copies for deep sweeps.
-    default: "/var/log/php*fpm*.log,/var/log/php*fpm/*.log,/var/log/php-fpm/*.log,/var/log/apache2/*error*.log,/var/log/httpd/*error*,/var/log/nginx/*error*.log"
+    description: FPM/PHP error-log globs (comma-separated) scanned for Allowed-memory-size fatal errors, nonspecific PHP memory-exhaustion evidence associated with the php2shell trigger. Compressed logs (.gz etc.) are skipped; point at decompressed copies for deep sweeps.
+    default: "/var/log/php*fpm*.log*,/var/log/php*fpm/*.log*,/var/log/php-fpm/*.log*,/var/log/apache2/*error*,/var/log/httpd/*error*,/var/log/nginx/*error*.log*"
   - name: SinceDate
     type: timestamp
     description: Include low-scoring PHP files modified after this UTC date; blank uses the last seven days
@@ -59,6 +59,10 @@ parameters:
     type: bool
     description: When enabled (default), discovered binaries are executed with -n -v to read the authoritative version and issue verdicts. When disabled the source is discovery-only and reports no version verdicts.
     default: "Y"
+  - name: MaxProbes
+    type: int64
+    description: PHPInstallations only. Hard cap on binary executions per collection - at most MaxProbes-1 discovered runtimes are probed, reserving one slot for the PATH probe. When discoveries exceed the budget nothing is executed and every candidate is reported as "budget exceeded - unverified".
+    default: 100
   - name: FilterToToolAllowlist
     type: bool
     description: ProcessBehavior only. When N (default), every immediate child of a matched parent is reported with a MatchesToolAllowlist classification column. When Y, output is restricted to children whose names match the shell/tool allowlist.
@@ -122,23 +126,36 @@ sources:
 
   - name: FpmErrorLogEvidence
     query: |
-      // The php2shell exploit is reached through a PHP fatal error: the
-      // request exhausts memory before application code runs, so the worker
-      // logs "Allowed memory size ... exhausted". A burst of those in
-      // FPM/error logs around the exploitation window is the footprint of
-      // the trigger itself (cf. the laracraft triage script and Searchlight
-      // Cyber's OOM-based remote detection, see reference). A handful of
-      // OOM fatals is normal on busy apps - judge DENSITY and timestamps,
+      // NONSPECIFIC PHP memory-exhaustion evidence. The php2shell exploit is
+      // reached through a PHP fatal error: the request exhausts memory
+      // before application code runs, so the worker logs "Allowed memory
+      // size ... exhausted". A burst of those in FPM/error logs around the
+      // exploitation window is CONSISTENT with the trigger (cf. the
+      // laracraft triage script and Searchlight Cyber's OOM-based remote
+      // detection, see reference) - but the pattern matches ANY PHP memory
+      // exhaustion, so density alone never establishes an attack. A handful
+      // of OOM fatals is normal on busy apps - judge DENSITY and timestamps,
       // not single lines. Compressed logs are skipped (see parameter).
+      // Trade-offs: all matching lines are materialized to compute the
+      // total, and a very large log with few matches is still scanned in
+      // full (bytes scanned are not bounded by the output cap); output is
+      // capped at 10000 rows with PossiblyTruncated set when the cap bit.
       LET elogs = SELECT OSPath AS LogFile FROM glob(
           globs=split(string=ErrorLogGlobs, sep=","))
       WHERE NOT IsDir AND NOT OSPath =~ "(?i)\\.(gz|zip|bz2|xz)$"
+      GROUP BY LogFile
 
-      SELECT LogFile, Line
+      LET matched <= SELECT LogFile, Line
       FROM foreach(row=elogs,
         query={ SELECT LogFile, Line FROM parse_lines(filename=LogFile) })
-      WHERE Line =~ "Allowed memory size"
-      // Cap so a chatty log cannot flood the collection; raise for deeper sweeps.
+      WHERE Line =~ "Allowed memory size.*exhausted"
+
+      // count() over a materialized query emits running counts; the total
+      // is the maximum (ORDER BY N DESC LIMIT 1).
+      LET n_matched <= SELECT count() AS N FROM matched ORDER BY N DESC LIMIT 1
+
+      SELECT LogFile, Line, n_matched[0].N > 10000 AS PossiblyTruncated
+      FROM matched
       LIMIT 10000
 
   - name: SessionFileEvidence
@@ -225,9 +242,14 @@ sources:
       //
       // Evidence policy: the directory name is a HINT, the binary is the
       // evidence. Every discovered runtime is probed (-n -v, no php.ini
-      // loading); the probed version drives any verdict. A path-derived
-      // version is reported only as an unverified hint (PathHint) and never
-      // issues an affirmative verdict; path/binary disagreement is flagged.
+      // loading) within a HARD execution budget (MaxProbes: at most
+      // MaxProbes-1 probes plus one PATH probe; over budget, nothing
+      // executes and every candidate reports "budget exceeded -
+      // unverified"). The probed version drives any verdict, and only a
+      // ZERO-EXIT probe can issue one - a nonzero exit with version-looking
+      // stdout is surfaced, never trusted. A path-derived version is
+      // reported only as an unverified hint (PathHint) and never issues an
+      // affirmative verdict; path/binary disagreement is flagged.
       LET key(v) = atoi(string=split(string=v, sep_string=".")[0]) * 1000000 +
                    atoi(string=split(string=v, sep_string=".")[1]) * 1000 +
                    atoi(string=split(string=v, sep_string=".")[2])
@@ -310,39 +332,46 @@ sources:
 
       LET all_candidates <= SELECT Binary, PathVersion FROM chain(a=nix_candidates, b=win_candidates)
 
-      // Probe EVERY discovered runtime (not only path-unversioned ones):
-      // the inner query carries PathVersion through the probe, and execve
-      // emits a row even when the probe fails, so every candidate reports -
-      // failed probes become unverified, never silently dropped. The
-      // candidate set is bounded by the runtime-name allowlist and the
-      // narrow discovery globs (typical hosts: single digits; the PATH
-      // probe adds one more execution). Probe exit status is retained in
-      // ProbeReturnCode: a nonzero exit with version-looking stdout is
-      // visible instead of silently driving a verdict.
-      LET assessed <= SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode FROM if(condition=EnableProbing,
-              then={ SELECT Binary, PathVersion,
-                       parse_string_with_regex(string=Stdout,
-                         regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion,
-                       ReturnCode AS ProbeReturnCode
+      // HARD EXECUTION BUDGET: count the deduplicated candidates, reserve
+      // one slot for the PATH probe, and if the total exceeds MaxProbes-1
+      // execute NOTHING - every candidate is reported with a "budget
+      // exceeded - unverified" note instead (no partial probing). count()
+      // over a materialized query emits running counts, so the total is
+      // the maximum (ORDER BY N DESC LIMIT 1).
+      LET n_cands <= SELECT count() AS N FROM all_candidates ORDER BY N DESC LIMIT 1
+      LET over_budget = n_cands[0].N > MaxProbes - 1
+
+      LET assessed <= SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode, BudgetNote FROM if(
+              condition=NOT EnableProbing OR over_budget,
+              then={ SELECT Binary, PathVersion, NULL AS ObservedVersion,
+                            NULL AS ProbeReturnCode,
+                            if(condition=over_budget,
+                               then="budget exceeded - unverified", else="") AS BudgetNote
+                     FROM all_candidates },
+              else={ SELECT Binary, PathVersion,
+                        parse_string_with_regex(string=Stdout,
+                          regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion,
+                        ReturnCode AS ProbeReturnCode, "" AS BudgetNote
                      FROM foreach(row=all_candidates,
-                       query={ SELECT Binary, PathVersion, Stdout, ReturnCode FROM execve(argv=[Binary, "-n", "-v"], length=10000) }) },
-              else={ SELECT Binary, PathVersion, NULL AS ObservedVersion, NULL AS ProbeReturnCode FROM all_candidates })
+                       query={ SELECT Binary, PathVersion, Stdout, ReturnCode FROM execve(argv=[Binary, "-n", "-v"], length=10000) }) })
 
       // PATH probe (POSIX only): catches php even when no glob layout
-      // matches; skipped on Windows and in discovery-only mode. The label
-      // records provenance; it may duplicate a glob-discovered install
-      // (distinct row, distinct provenance).
-      LET skip_path_probe <= on_windows OR NOT EnableProbing
+      // matches; skipped on Windows, in discovery-only mode and when the
+      // budget is exceeded. Failed probes are RETAINED (no filter on the
+      // observed version): a php-less host yields one unverified row with
+      // the nonzero return code, keeping the probe outcome visible. The
+      // label records provenance; it may duplicate a glob-discovered
+      // install (distinct row, distinct provenance).
+      LET skip_path_probe <= on_windows OR NOT EnableProbing OR over_budget
       LET path_probe <= SELECT "php (PATH)" AS Binary, NULL AS PathVersion,
-             NULL AS ProbeReturnCode,
-             parse_string_with_regex(string=Stdout,
-               regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion
+              ReturnCode AS ProbeReturnCode, "" AS BudgetNote,
+              parse_string_with_regex(string=Stdout,
+                regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion
       FROM if(condition=skip_path_probe,
               then={ SELECT '' AS Binary FROM scope() WHERE FALSE },
-              else={ SELECT Stdout FROM execve(argv=["php", "-n", "-v"], length=10000) })
-      WHERE ObservedVersion
+              else={ SELECT Stdout, ReturnCode FROM execve(argv=["php", "-n", "-v"], length=10000) })
 
-      LET assessed2 <= SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode,
+      LET assessed2 <= SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode, BudgetNote,
              if(condition=ObservedVersion,
                 then=split(string=ObservedVersion, sep_string=".")[0] + "." +
                      split(string=ObservedVersion, sep_string=".")[1],
@@ -355,16 +384,29 @@ sources:
            else=if(condition=PathVersion, then="path-derived (unverified)",
                    else="unverified")) AS Source,
         PathVersion AS PathHint,
+        if(condition=Branch, then=fixed[Branch], else=NULL) AS ConfiguredFixedVersion,
         if(condition=ObservedVersion AND PathVersion AND ObservedVersion != PathVersion,
            then="path/binary version disagreement - probed value used", else="") AS Note,
         ProbeReturnCode,
-        if(condition=ObservedVersion,
-           then=if(condition=fixed[Branch] AND fixed[Branch] =~ "^[0-8]\\.[0-9]+\\.[0-9]+$",
+        BudgetNote,
+        // Affirmative verdicts require: a probed version, a ZERO probe
+        // exit, and a FixedVersions entry that is well-formed AND belongs
+        // to the observed branch (a valid-looking value for the WRONG
+        // branch, e.g. {"8.3":"8.2.35"}, is invalid here and routes to
+        // manual review). Missing vs invalid mappings are distinguished.
+        if(condition=ObservedVersion AND ProbeReturnCode = 0,
+           then=if(condition=fixed[Branch] AND fixed[Branch] =~ "^[0-8]\\.[0-9]+\\.[0-9]+$"
+                     AND split(string=fixed[Branch], sep_string=".")[0] = split(string=Branch, sep_string=".")[0]
+                     AND split(string=fixed[Branch], sep_string=".")[1] = split(string=Branch, sep_string=".")[1],
                    then=if(condition=key(v=ObservedVersion) < key(v=fixed[Branch]),
                            then="version below official fixed version - check distro backports and the vendor advisory",
                            else="version at or above official fixed version"),
-                   else="no official fixed version for this branch - manual review"),
-           else=if(condition=PathVersion,
-                   then="path-derived version unverified - manual review",
-                   else="version could not be determined - manual review")) AS Status
+                   else=if(condition=fixed[Branch],
+                           then="configured fixed version invalid for this branch - manual review",
+                           else="no official fixed version for this branch - manual review")),
+           else=if(condition=ObservedVersion,
+                   then="probe exited nonzero - version unconfirmed - manual review",
+                   else=if(condition=PathVersion,
+                           then="path-derived version unverified - manual review",
+                           else="version could not be determined - manual review"))) AS Status
       FROM assessed2
