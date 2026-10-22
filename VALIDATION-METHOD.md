@@ -85,14 +85,45 @@ measurements before the next round. The severity curve converged
 **SOLID** for both the detection logic and the validation claims, with no
 high-severity findings outstanding.
 
+## 5. Run manifest and evidence
+
+Full-collection outputs and command logs are retained in the encrypted
+evidence bucket `php2shell-evidence-d63bfbc3bcb9ee837200948705`, keyed by
+date and artifact commit (for example `2026-10-22/7cddbcb/`), with the
+following recorded per run: instance IDs, AMI, Velociraptor version,
+artifact SHA-256, parameters, runtime, and row counts. The instance role
+has `PutObject` only; retrieval is operator-side. S3 versioning keeps
+prior object versions; version IDs and SHA-256 hashes for each object are
+recorded in a manifest stored alongside the evidence.
+
+Reproduce any artifact collection with:
+
+```
+velociraptor --definitions <dir> artifacts collect \
+  Generic.Detection.PHP2Shell/<Source> --args "Param=Value" --output out.zip
+```
+
+Lint with `velociraptor artifacts verify Generic.Detection.PHP2Shell.yaml -v`.
+The regression suites run offline: `bash tests/run-tests.sh` and
+`pwsh tests/run-tests.ps1` (one environment-dependent YAML-parse check
+reports an explicit skip when no parser module is installed).
+
 ## Known limitations
 
 See **Interpretation and coverage** in the README. The most operationally
 relevant: defaults are not complete discovery (adjust paths per deployment);
 the version inventory is a lead to review against the official php.net
-advisory, not a vendor verdict; path-derived Windows versions trust the
-directory name; artifact content reads are capped (1 MB per session file,
-500 KB per PHP file); and the bash checker's guaranteed-valid JSON output
-assumes `iconv` is installed. The known-good webroot diff and
-POST-COMPROMISE.md were added after the lab validation and are covered by
-the regression suites only.
+advisory, not a vendor verdict; path-derived versions trust the directory
+name and never issue verdicts on their own; distro packages may backport
+the fix without bumping the upstream version (confirm via package
+changelog); artifact content reads are capped (1 MB per session file,
+500 KB per PHP file); error-log and access-log scans skip compressed
+files and cap output at 10000 lines, so one very chatty log can crowd out
+other files in the same collection; the version probe runs `php -n -v`
+with no per-probe timeout (collection-level resource limits apply); and
+the bash checker's guaranteed-valid JSON output assumes `iconv` is
+installed. The known-good webroot diff and POST-COMPROMISE.md were added
+after the lab validation and are covered by the regression suites only.
+Container-internal PHP runtimes, macOS and FreeBSD hosts, and real
+cPanel/Plesk/Remi servers are outside validated coverage; the
+`AdditionalBinaryGlobs` parameter exists for such layouts.

@@ -17,6 +17,12 @@ reference:
   - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
   - https://github.com/cyb3r-monk/Threat-Hunting-and-Detection/blob/main/Uncategorized/PHP2Shell.md
   - https://docs.velociraptor.app/exchange/artifacts/pages/phpinventory/
+  - https://laracraft.tech/en/blog/php2shell-were-you-hit-a-read-only-triage-script-for-your-server
+  - https://www.slcyber.io/research/high-fidelity-detection-mechanism-for-php2shell-cve-2026-109618-and-cve-2026-109619
+  - https://github.com/assetnote/php2shell-scanner
+  - https://calif.io/php2shell/
+  - https://github.com/ikow/php2shell-poc
+  - https://github.com/9bie/php2shell-bypass-aslr-exp
 
 required_permissions:
   - EXECVE
@@ -33,6 +39,9 @@ parameters:
   - name: AccessLogGlobs
     description: Access log globs (comma-separated); markers must be present in logged fields
     default: "/var/log/apache2/*access*,/var/log/nginx/*access*,/var/log/httpd/*access*,C:/inetpub/logs/LogFiles/**/*.log"
+  - name: ErrorLogGlobs
+    description: FPM/PHP error-log globs (comma-separated) scanned for Allowed-memory-size fatal errors, the footprint of the php2shell trigger. Compressed logs (.gz etc.) are skipped; point at decompressed copies for deep sweeps.
+    default: "/var/log/php*fpm*.log,/var/log/php*fpm/*.log,/var/log/php-fpm/*.log,/var/log/apache2/*error*.log,/var/log/httpd/*error*,/var/log/nginx/*error*.log"
   - name: SinceDate
     type: timestamp
     description: Include low-scoring PHP files modified after this UTC date; blank uses the last seven days
@@ -111,6 +120,27 @@ sources:
       // Cap so a chatty log cannot flood the collection; raise for deeper sweeps.
       LIMIT 10000
 
+  - name: FpmErrorLogEvidence
+    query: |
+      // The php2shell exploit is reached through a PHP fatal error: the
+      // request exhausts memory before application code runs, so the worker
+      // logs "Allowed memory size ... exhausted". A burst of those in
+      // FPM/error logs around the exploitation window is the footprint of
+      // the trigger itself (cf. the laracraft triage script and Searchlight
+      // Cyber's OOM-based remote detection, see reference). A handful of
+      // OOM fatals is normal on busy apps - judge DENSITY and timestamps,
+      // not single lines. Compressed logs are skipped (see parameter).
+      LET elogs = SELECT OSPath AS LogFile FROM glob(
+          globs=split(string=ErrorLogGlobs, sep=","))
+      WHERE NOT IsDir AND NOT OSPath =~ "(?i)\\.(gz|zip|bz2|xz)$"
+
+      SELECT LogFile, Line
+      FROM foreach(row=elogs,
+        query={ SELECT LogFile, Line FROM parse_lines(filename=LogFile) })
+      WHERE Line =~ "Allowed memory size"
+      // Cap so a chatty log cannot flood the collection; raise for deeper sweeps.
+      LIMIT 10000
+
   - name: SessionFileEvidence
     query: |
       // Content co-occurrence is suspicious, not proof of code execution.
@@ -176,7 +206,12 @@ sources:
       // Version inventory only. Whether a build is affected by any specific
       // vulnerability depends on the vendor advisory; FixedVersions above is
       // official (confirmed 2026-10-21, see README) and verdicts here are
-      // leads, not confirmations.
+      // leads, not confirmations. Distro packages often backport the fix
+      // WITHOUT bumping the upstream version, so a below-fixed verdict on a
+      // distro PHP must be confirmed against the package changelog (apt
+      // changelog / rpm -q --changelog, grep the CVE numbers). Malformed
+      // FixedVersions values are treated as unmapped (manual review), never
+      // as an affirmative verdict.
       //
       // Comparison is NUMERIC and component-wise. A string comparison is wrong
       // here: "8.3.9" sorts lexicographically after "8.3.36" and would report
@@ -219,7 +254,7 @@ sources:
 
       // Extra user globs (one per line, trimmed).
       LET extra_globs <= filter(list=split(string=AdditionalBinaryGlobs, sep_string="\n"),
-                                condition="x=>x AND trim(string=x) != ''")
+                                condition="x=>x AND x != ''")
 
       // Discovery is materialized once (<=) and deduplicated (GROUP BY):
       // overlapping globs (C:\php\**5 and C:\php*\... etc.) must not cause
@@ -240,7 +275,7 @@ sources:
             "/opt/alt/php*/usr/{bin,sbin}/php*",
             "/opt/lampp/{bin,sbin}/php*",
             "/opt/bitnami/php/{bin,sbin}/php*"]) },
-            b={ SELECT * FROM if(condition=len(list=extra_globs) > 0,
+            b={ SELECT * FROM if(condition=len(list=extra_globs) > 0 AND NOT on_windows,
                     then={ SELECT FullPath, Name, IsDir FROM glob(globs=extra_globs) },
                     else={ SELECT '' AS FullPath, '' AS Name, FALSE AS IsDir FROM scope() WHERE FALSE }) })
       WHERE NOT IsDir AND is_runtime(name=Name)
@@ -259,7 +294,7 @@ sources:
             "C:\\xampp\\php\\php*.exe", "C:\\wamp*\\bin\\php\\**5\\php*.exe",
             "C:\\laragon\\bin\\php\\**5\\php*.exe",
             "C:\\inetpub\\**5\\php*.exe"]) },
-            b={ SELECT * FROM if(condition=len(list=extra_globs) > 0,
+            b={ SELECT * FROM if(condition=len(list=extra_globs) > 0 AND on_windows,
                     then={ SELECT FullPath, Name, IsDir FROM glob(globs=extra_globs) },
                     else={ SELECT '' AS FullPath, '' AS Name, FALSE AS IsDir FROM scope() WHERE FALSE }) })
       WHERE NOT IsDir AND is_runtime(name=Name)
@@ -278,25 +313,20 @@ sources:
       // Probe EVERY discovered runtime (not only path-unversioned ones):
       // the inner query carries PathVersion through the probe, and execve
       // emits a row even when the probe fails, so every candidate reports -
-      // failed probes become unverified, never silently dropped. Budget:
-      // at most 99 glob-discovered probes + 1 PATH probe = 100 execve calls
-      // per collection. Discoveries beyond the budget are still REPORTED as
-      // unprobed (unverified) - never silently dropped. Probe exit status is
-      // retained in ProbeReturnCode: a nonzero exit with version-looking
-      // stdout is visible instead of silently driving a verdict.
-      LET probe_input <= SELECT Binary, PathVersion FROM all_candidates LIMIT 99
-
-      LET probed = SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode FROM if(condition=EnableProbing,
+      // failed probes become unverified, never silently dropped. The
+      // candidate set is bounded by the runtime-name allowlist and the
+      // narrow discovery globs (typical hosts: single digits; the PATH
+      // probe adds one more execution). Probe exit status is retained in
+      // ProbeReturnCode: a nonzero exit with version-looking stdout is
+      // visible instead of silently driving a verdict.
+      LET assessed <= SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode FROM if(condition=EnableProbing,
               then={ SELECT Binary, PathVersion,
                        parse_string_with_regex(string=Stdout,
                          regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion,
                        ReturnCode AS ProbeReturnCode
-                     FROM foreach(row=probe_input,
+                     FROM foreach(row=all_candidates,
                        query={ SELECT Binary, PathVersion, Stdout, ReturnCode FROM execve(argv=[Binary, "-n", "-v"], length=10000) }) },
-              else={ SELECT Binary, PathVersion, NULL AS ObservedVersion, NULL AS ProbeReturnCode FROM probe_input })
-      LET unprobed = SELECT Binary, PathVersion, NULL AS ObservedVersion, NULL AS ProbeReturnCode
-             FROM all_candidates WHERE NOT (Binary IN probed.Binary)
-      LET assessed = SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode FROM chain(a=probed, b=unprobed)
+              else={ SELECT Binary, PathVersion, NULL AS ObservedVersion, NULL AS ProbeReturnCode FROM all_candidates })
 
       // PATH probe (POSIX only): catches php even when no glob layout
       // matches; skipped on Windows and in discovery-only mode. The label
@@ -304,6 +334,7 @@ sources:
       // (distinct row, distinct provenance).
       LET skip_path_probe <= on_windows OR NOT EnableProbing
       LET path_probe <= SELECT "php (PATH)" AS Binary, NULL AS PathVersion,
+             NULL AS ProbeReturnCode,
              parse_string_with_regex(string=Stdout,
                regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion
       FROM if(condition=skip_path_probe,
@@ -311,7 +342,7 @@ sources:
               else={ SELECT Stdout FROM execve(argv=["php", "-n", "-v"], length=10000) })
       WHERE ObservedVersion
 
-      LET assessed2 = SELECT Binary, PathVersion, ObservedVersion,
+      LET assessed2 <= SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode,
              if(condition=ObservedVersion,
                 then=split(string=ObservedVersion, sep_string=".")[0] + "." +
                      split(string=ObservedVersion, sep_string=".")[1],
@@ -328,9 +359,9 @@ sources:
            then="path/binary version disagreement - probed value used", else="") AS Note,
         ProbeReturnCode,
         if(condition=ObservedVersion,
-           then=if(condition=fixed[Branch],
+           then=if(condition=fixed[Branch] AND fixed[Branch] =~ "^[0-8]\\.[0-9]+\\.[0-9]+$",
                    then=if(condition=key(v=ObservedVersion) < key(v=fixed[Branch]),
-                           then="version below official fixed version - confirm against the vendor advisory",
+                           then="version below official fixed version - check distro backports and the vendor advisory",
                            else="version at or above official fixed version"),
                    else="no official fixed version for this branch - manual review"),
            else=if(condition=PathVersion,

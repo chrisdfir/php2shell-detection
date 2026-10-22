@@ -83,6 +83,13 @@ and 2 are for.
   these run on every request without any shell file existing.
 - PHP-FPM pool settings and per-request `PHP_VALUE` overrides.
 - Upload temp folders and every level of `session.save_path`.
+- PHP-FPM and web-server error logs: the exploit is reached through a
+  fatal `Allowed memory size ... exhausted` error, so a burst of those
+  lines around the exploitation window is the footprint of the trigger
+  itself (the artifact's `FpmErrorLogEvidence` source scans these; a
+  handful is normal on busy apps, judge density and timestamps). On
+  PHP-FPM, a startup-phase fatal also kills the worker, so clusters of
+  worker exit/restart messages deserve a look.
 
 ## 5. Assume the same trick worked elsewhere
 
@@ -95,6 +102,25 @@ the flaw is in PHP itself, so any application on a vulnerable runtime
 is a candidate. Sweep every PHP host with the same playbook, and while
 you have a box, look for second-stage persistence: cron entries,
 systemd units, SSH keys, web server config changes.
+
+Two facts worth keeping straight while you do this:
+
+- **Stock configurations are exploitable.** Public exploits work under
+  the official `php.ini-production` (`display_errors=Off`,
+  `memory_limit=128M`) and reach the bug with chunked multipart requests
+  that stay under `post_max_size`. Do not rule a host out because its
+  config looks boring.
+- **Version numbers lie on distros.** Debian, Ubuntu and RHEL often
+  backport the fix without bumping the upstream version, so a build
+  reporting a pre-fix number may be patched. Confirm with the package
+  changelog: `apt changelog php8.3-fpm | grep -E '109618|109619'` or
+  `rpm -q --changelog php-fpm | grep -E '109618|109619'`.
+
+If the host was exposed during the disclosure window, treat in-memory
+secrets as compromised regardless of what the scans find: the memory
+disclosure variant of this bug leaves almost nothing on disk. Rotate
+`APP_KEY` (keeping the old value in `APP_PREVIOUS_KEYS`), database
+credentials, API keys and any TLS keys living on the same box.
 
 ## Practical sequence
 
