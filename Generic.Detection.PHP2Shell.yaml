@@ -305,7 +305,7 @@ sources:
 
       LET win_raw <= SELECT FullPath AS Binary, Name AS BinName,
              parse_string_with_regex(string=FullPath,
-               regex="php[-\\/]?([0-9][0-9.a-zA-Z-]*)").g1 AS PathToken
+               regex="php[-\\\\/]?([0-9][0-9.a-zA-Z-]*)").g1 AS PathToken
       FROM chain(
             a={ SELECT FullPath, Name, IsDir FROM glob(globs=[
             "C:\\php\\**5\\php*.exe", "C:\\php*\\php*.exe",
