@@ -50,30 +50,50 @@ parameters:
     type: bool
     description: When enabled (default), discovered binaries are executed with -n -v to read the authoritative version and issue verdicts. When disabled the source is discovery-only and reports no version verdicts.
     default: "Y"
+  - name: FilterToToolAllowlist
+    type: bool
+    description: ProcessBehavior only. When N (default), every immediate child of a matched parent is reported with a MatchesToolAllowlist classification column. When Y, output is restricted to children whose names match the shell/tool allowlist.
+    default: "N"
 
 sources:
   - name: ProcessBehavior
     query: |
-      // Generic behavior: legitimate jobs can also launch these programs.
-      // ProcessCreatedAfter is the newly-observed view (cf. cyb3r-monk's
-      // PHP2Shell KQL first-seen approach): blank reports every matching
-      // child, a date limits results to processes created since then.
-      // Parent match includes versioned PHP binaries (php8.3, php-fpm8.3).
+      // Generic behavior: children of PHP/web-server parents are CLASSIFIED,
+      // not filtered - every immediate child is reported with
+      // MatchesToolAllowlist (shell/interpreter/tool set), and
+      // FilterToToolAllowlist=Y optionally restricts output to those. An
+      // allowlist match is a triage signal, never a verdict on its own;
+      // unlisted children (conhost, renamed binaries) stay visible so nothing
+      // is hidden. ProcessCreatedAfter is the newly-observed view (cf.
+      // cyb3r-monk's PHP2Shell KQL first-seen approach): blank reports every
+      // matching child, a date limits results to processes created since
+      // then. Parent match includes versioned PHP binaries (php8.3,
+      // php-fpm8.3, php-cgi8.3, php-dbg).
       LET proc_cutoff <= if(condition=ProcessCreatedAfter,
                             then=ProcessCreatedAfter,
                             else=timestamp(epoch=0))
       LET procs <= SELECT * FROM pslist()
-      LET parents = SELECT Pid FROM procs
-      WHERE Name =~ "(?i)^(php(?:[0-9.]*|-fpm[0-9.]*)?|php-cgi|httpd|apache2?|nginx|w3wp)(?:\\.exe)?$"
+      LET parents <= SELECT Pid AS ParentPid, Name AS ParentName,
+                            Exe AS ParentExe, CreateTime AS ParentCreateTime
+             FROM procs
+             WHERE Name =~ "(?i)^(php(?:[0-9.]*|-fpm[0-9.]*|-cgi[0-9.]*|-dbg[0-9.]*)?|httpd|apache2?|nginx|w3wp)(?:\\.exe)?$"
+      LET child_rows = SELECT Pid, Ppid, Name, CommandLine, Exe, CreateTime,
+                              Username, ParentName, ParentExe, ParentCreateTime,
+                              if(condition=Name =~ "(?i)^(sh|bash|dash|zsh|python[0-9.]*|perl|php|nc|ncat|netcat|curl|wget|powershell|pwsh|cmd|certutil|bitsadmin|whoami|id|cat|chmod|chown|touch|tee)(?:\\.exe)?$",
+                                 then=TRUE, else=FALSE) AS MatchesToolAllowlist
+             FROM foreach(row=parents,
+               query={ SELECT Pid, Ppid, Name, CommandLine, Exe, CreateTime,
+                              Username, ParentName, ParentExe, ParentCreateTime
+                       FROM procs WHERE Ppid = ParentPid })
 
       SELECT Pid AS ChildPid, Ppid AS ParentPid,
              Name AS ChildName, CommandLine AS ChildCmdline,
              Exe AS ChildExe, CreateTime AS ChildCreateTime,
-             Username AS ChildUser
-      FROM procs
-      WHERE Ppid IN parents.Pid
-        AND CreateTime > proc_cutoff
-        AND Name =~ "(?i)^(sh|bash|dash|zsh|python[0-9.]*|perl|php|nc|ncat|netcat|curl|wget|powershell|pwsh|cmd|certutil|bitsadmin|whoami|id|cat|chmod|chown|touch|tee)(?:\\.exe)?$"
+             Username AS ChildUser, MatchesToolAllowlist,
+             ParentName, ParentExe, ParentCreateTime
+      FROM child_rows
+      WHERE CreateTime > proc_cutoff
+        AND (NOT FilterToToolAllowlist OR MatchesToolAllowlist)
 
   - name: AccessLogEvidence
     query: |
@@ -258,17 +278,25 @@ sources:
       // Probe EVERY discovered runtime (not only path-unversioned ones):
       // the inner query carries PathVersion through the probe, and execve
       // emits a row even when the probe fails, so every candidate reports -
-      // failed probes become unverified, never silently dropped. Bound: at
-      // most 100 execve calls per collection.
-      LET probe_input <= SELECT Binary, PathVersion FROM all_candidates LIMIT 100
+      // failed probes become unverified, never silently dropped. Budget:
+      // at most 99 glob-discovered probes + 1 PATH probe = 100 execve calls
+      // per collection. Discoveries beyond the budget are still REPORTED as
+      // unprobed (unverified) - never silently dropped. Probe exit status is
+      // retained in ProbeReturnCode: a nonzero exit with version-looking
+      // stdout is visible instead of silently driving a verdict.
+      LET probe_input <= SELECT Binary, PathVersion FROM all_candidates LIMIT 99
 
-      LET assessed = SELECT Binary, PathVersion, ObservedVersion FROM if(condition=EnableProbing,
+      LET probed = SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode FROM if(condition=EnableProbing,
               then={ SELECT Binary, PathVersion,
                        parse_string_with_regex(string=Stdout,
-                         regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion
+                         regex="PHP ([0-9]+\\.[0-9]+\\.[0-9]+)( |$)").g1 AS ObservedVersion,
+                       ReturnCode AS ProbeReturnCode
                      FROM foreach(row=probe_input,
-                       query={ SELECT Binary, PathVersion, Stdout FROM execve(argv=[Binary, "-n", "-v"], length=10000) }) },
-              else={ SELECT Binary, PathVersion, NULL AS ObservedVersion FROM probe_input })
+                       query={ SELECT Binary, PathVersion, Stdout, ReturnCode FROM execve(argv=[Binary, "-n", "-v"], length=10000) }) },
+              else={ SELECT Binary, PathVersion, NULL AS ObservedVersion, NULL AS ProbeReturnCode FROM probe_input })
+      LET unprobed = SELECT Binary, PathVersion, NULL AS ObservedVersion, NULL AS ProbeReturnCode
+             FROM all_candidates WHERE NOT (Binary IN probed.Binary)
+      LET assessed = SELECT Binary, PathVersion, ObservedVersion, ProbeReturnCode FROM chain(a=probed, b=unprobed)
 
       // PATH probe (POSIX only): catches php even when no glob layout
       // matches; skipped on Windows and in discovery-only mode. The label
@@ -298,6 +326,7 @@ sources:
         PathVersion AS PathHint,
         if(condition=ObservedVersion AND PathVersion AND ObservedVersion != PathVersion,
            then="path/binary version disagreement - probed value used", else="") AS Note,
+        ProbeReturnCode,
         if(condition=ObservedVersion,
            then=if(condition=fixed[Branch],
                    then=if(condition=key(v=ObservedVersion) < key(v=fixed[Branch]),
