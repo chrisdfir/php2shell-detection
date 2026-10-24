@@ -17,3 +17,19 @@ validation/
 ANALYSIS.md
 VALIDATION.md
 _codex_*.md
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
+
+# Agent and task-tracking tooling (local only, never part of the detection release)
+.agents/
+.claude/
+.codex/
+.cursor/
+AGENTS.md
+CLAUDE.md
+.beads/
