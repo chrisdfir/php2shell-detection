@@ -44,8 +44,12 @@ scans cannot fake.
   the compromise window.
 - Exploit signals published by the PHP researchers (Wiz) and the
   php-src advisory, worth grepping for directly:
-  - multipart POSTs followed by memory-limit errors or bursts of
-    HTTP 500 responses from the same source;
+  - multipart requests followed by memory-limit errors or bursts of
+    HTTP 500 responses from the same source; on PHP 8.4 and later the
+    multipart input can arrive on GET, PUT, PATCH, or DELETE as well
+    as POST;
+  - `Session object destruction failed` in PHP or FPM error logs,
+    which can accompany session-store cleanup after a fatal error;
   - unexpectedly large or malformed `PHPSESSID` response cookies
     (the memory-disclosure primitive leaks worker memory through
     that cookie);
@@ -83,13 +87,21 @@ and 2 are for.
   these run on every request without any shell file existing.
 - PHP-FPM pool settings and per-request `PHP_VALUE` overrides.
 - Upload temp folders and every level of `session.save_path`.
-- PHP-FPM and web-server error logs: the exploit is reached through a
-  fatal `Allowed memory size ... exhausted` error, so a burst of those
-  lines around the exploitation window is the footprint of the trigger
-  itself (the artifact's `FpmErrorLogEvidence` source scans these; a
-  handful is normal on busy apps, judge density and timestamps). On
-  PHP-FPM, a startup-phase fatal also kills the worker, so clusters of
-  worker exit/restart messages deserve a look.
+- PHP-FPM and web-server error logs: several php2shell paths are
+  reached through a fatal error. `Allowed memory size ... exhausted`
+  during multipart parsing is the common OOM signature, and
+  `Session object destruction failed` can follow a fatal during
+  session cleanup. A burst of either around the exploitation window is
+  consistent with the trigger (the artifact's `FpmErrorLogEvidence`
+  source scans both; a handful is normal on busy apps, judge density
+  and timestamps). OOM is not a mandatory footprint of every path.
+  On PHP-FPM, a startup-phase fatal also kills the worker, so clusters
+  of worker exit/restart messages deserve a look.
+- PHP configuration: `session.upload_progress.enabled`, the
+  configured `session.serialize_handler`, `memory_limit`,
+  `fatal_error_backtraces` (PHP 8.5), and OPcache settings. A runtime
+  switch from `php_binary` or `php_serialize` to `php` before
+  `session_start()` is the precondition for CVE-2026-115560.
 
 ## 5. Assume the same trick worked elsewhere
 
@@ -110,6 +122,11 @@ Two facts worth keeping straight while you do this:
   `memory_limit=128M`) and reach the bug with chunked multipart requests
   that stay under `post_max_size`. Do not rule a host out because its
   config looks boring.
+- **Patched does not mean clear.** The version thresholds cover
+  CVE-2026-109618 and CVE-2026-109619 only. Chain A (session injection
+  plus an application LFI) is reported to work on patched PHP, the
+  session-fixation and serializer fixes in PR 22113 are not merged, and
+  CVE-2026-115560 remains unpatched as of 2026-10-24.
 - **Version numbers lie on distros.** Debian, Ubuntu and RHEL often
   backport the fix without bumping the upstream version, so a build
   reporting a pre-fix number may be patched. Confirm with the package

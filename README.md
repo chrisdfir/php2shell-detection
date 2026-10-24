@@ -1,102 +1,166 @@
 # PHP2Shell Detection
 
-Host-side detection for CVE-2026-109618 / CVE-2026-109619 (the "php2shell" PHP session upload progress RCEs). Unlike the remote version scanners, these tools run on the host: PHP version inventory, session-file evidence, webshell content scoring, a known-good webroot diff, and a Velociraptor artifact for fleet sweeps.
+Host-side detection for CVE-2026-109618 and CVE-2026-109619, the PHP
+`session.upload_progress` remote code execution vulnerabilities. The content
+inventories PHP versions, collects session-file and webroot evidence, and hunts
+process and log artifacts. Findings are investigation leads, not proof of
+exploitation, and no matches do not establish that a host is uncompromised.
 
-Findings are leads for investigation, not confirmation of exploitation or attribution to a particular vulnerability. No matches do not establish that a host is uncompromised.
+Author: Chris DiSalle (@chrisdfir)
 
-**Author:** Chris DiSalle (@chrisdfir)
+## Contents
 
-## Detection content
-
-| File | Coverage |
+| File | Purpose |
 |---|---|
-| `Generic.Detection.PHP2Shell.yaml` | Velociraptor artifact with process, access-log, session-file, and webroot hunts |
-| `PHP2Shell-Check.ps1` | Standalone PowerShell session-file and webroot hunts |
-| `PHP2Shell-Check.sh` | Linux/bash counterpart of the PowerShell script (PHP version inventory, session-file and webroot hunts, known-good webroot diff) |
-| `POST-COMPROMISE.md` | What to look for, in order, when you already know a host was compromised |
+| `Generic.Detection.PHP2Shell.yaml` | Velociraptor artifact with six sources: process behavior, access logs, error logs, session files, webroot files, and PHP installations |
+| `PHP2Shell-Check.ps1` | Standalone Windows scan: session files, webroot, version inventory, known-good diff |
+| `PHP2Shell-Check.sh` | Linux counterpart of the PowerShell checker; JSON report on stdout |
+| `POST-COMPROMISE.md` | Ordered investigation guide for a known-compromised host |
+| `VALIDATION-METHOD.md` | Validation scope, results, evidence, and known limits |
+| `CHANGELOG.md` | Release history |
 
-The platform regression suites used during validation are retained as validation tooling and described in [VALIDATION-METHOD.md](VALIDATION-METHOD.md); they are not part of this release tree.
+## Quick start
 
-The Velociraptor artifact is named `Generic.Detection.PHP2Shell`, following the artifact exchange naming convention.
-
-- **ProcessBehavior:** a snapshot of PHP/web-server processes with children such as shells, interpreters, and downloaders. Legitimate application activity can match; short-lived processes can be missed.
-- **AccessLogEvidence:** POST log lines containing `php2shell` or `PHP_SESSION_UPLOAD_PROGRESS`. These are literal markers, not an exploit signature. Standard access logs generally omit request bodies; changed or absent markers evade this hunt.
-- **FpmErrorLogEvidence:** `Allowed memory size ... exhausted` fatal errors from PHP-FPM/error logs. The exploit is reached through exactly this fatal error, so a burst of these lines around the exploitation window is consistent with the trigger - but the pattern is nonspecific PHP memory-exhaustion evidence, so density alone never establishes an attack (a handful is normal on busy apps; judge density and timestamps). Compressed logs (`.gz` etc.) are skipped; decompress copies for deep sweeps. Output is capped at 10000 lines with a `PossiblyTruncated` flag set only when matches exceed the cap (exactly 10000 matches is a complete result), so one very chatty log can crowd out other files in the same collection; the cap does not bound bytes scanned - a very large log with few matches is read in full.
-- **SessionFileEvidence:** `sess_*` files containing `upload_progress_` together with a PHP opening tag (case-insensitive; `<?PHP` is valid PHP) or a serialized-object marker (`O:`/`C:` tokens, including objects nested in arrays and pipeless `php_serialize` output). Co-occurrence does not establish execution; legitimate stored content may match.
-- **RecentPhpFiles:** PHP files matching at least two of eight pattern families, or modified within the selected window. The score counts pattern families, not probability of compromise. Comments, examples, and legitimate application code can score highly. Recent modification alone is a weak lead.
-- **PHPInstallations:** PHP version inventory with broad filesystem discovery (Linux PATH plus `/usr`, `/usr/local`, Remi, Plesk, cPanel, CloudLinux, LAMPP, Bitnami layouts; Windows `C:\php*`, Program Files x86/x64, Plesk, Laragon, WAMP, XAMPP, IIS layouts - adapted from [Generic.Applications.PHPInventory](https://docs.velociraptor.app/exchange/artifacts/pages/phpinventory/)). Every discovered runtime is probed with `php -n -v` and the **probed version drives any verdict** - and only a zero-exit probe can issue one; a nonzero exit is surfaced, never trusted. A version read from a directory name is reported only as an unverified hint (`PathHint`) and never issues a verdict on its own, and a path/binary disagreement is flagged. Probing runs under a hard budget (`MaxProbes`, default 100: at most 99 discovered runtimes plus one PATH probe; over budget nothing executes and every candidate reports `budget exceeded - unverified`) and can be disabled (`EnableProbing=N`) for a discovery-only sweep. Runtime names are allowlisted (`php`, versioned variants, `-cgi`/`-fpm`/`-dbg`; `phpize`/`php-config` are never executed). Versions are compared numerically against the `FixedVersions` parameter; a mapping value that is malformed or belongs to a different branch than the observed one routes to manual review (surfaced in `ConfiguredFixedVersion`). See the advisory-status note below.
-
-## Usage
-
-Import the YAML into Velociraptor, or collect locally:
+Velociraptor:
 
 ```text
 velociraptor --definitions . artifacts collect Generic.Detection.PHP2Shell --output out.zip
 ```
 
-Set `SessionPaths` and `WebRoots` to the actual directories in use (comma-separated in Velociraptor). Set `AccessLogGlobs` for custom access-log locations. `SinceDate` controls the low-scoring file modification window; blank defaults to the last seven days. Higher-scoring files are returned regardless of modification time.
+Set `SessionPaths`, `WebRoots`, and `AccessLogGlobs` for the deployment. Use
+comma-separated values. `SinceDate` controls the low-scoring file modification
+window; blank uses the last seven days.
 
-For PowerShell:
+PowerShell:
 
 ```powershell
 .\PHP2Shell-Check.ps1 -SessionPaths @('C:\custom\sessions') -WebRoots @('D:\www')
-# Optional UTC cutoff for the weak modification-time hunt:
-.\PHP2Shell-Check.ps1 -SinceDate '2026-10-20T00:00:00Z'
-# Optional: pin explicit php binaries for the version inventory (otherwise
-# PATH plus common Windows locations are discovered):
-.\PHP2Shell-Check.ps1 -PhpBins @('C:\php\8.3.9\php.exe')
-# Optional: compare the web root against a clean copy (see POST-COMPROMISE.md):
 .\PHP2Shell-Check.ps1 -WebRoots C:\inetpub\wwwroot -DiffAgainst C:\clean-copy
 ```
 
-For Linux (bash counterpart; human-readable output on stderr, JSON report on
-stdout so it can be piped to a file):
+Linux:
 
 ```bash
 ./PHP2Shell-Check.sh -p /var/lib/php/sessions -w /var/www/html
-# Optional: pin explicit php binaries for the version inventory (otherwise
-# PATH plus common Linux locations are discovered):
-./PHP2Shell-Check.sh -b /usr/bin/php,/usr/local/bin/php
-# Optional: override the official fixed-version mapping (e.g. for a future advisory):
-./PHP2Shell-Check.sh -f '8.3=8.3.36,8.4=8.4.27'
-# Optional: compare the web root against a clean copy (see POST-COMPROMISE.md):
 ./PHP2Shell-Check.sh -w /var/www/html -d /clean-copy-of-webroot
 ```
 
-The script prints findings and a JSON report including scanned and missing directories and scan errors. A score >= 2 webroot finding drives exit 1 unless the only matched patterns are request_input and callback_vectors - that pair alone is idiomatic CMS code (calibrated against a WordPress core baseline: 74% of benign strong rows), so it reports as a weak lead instead. Exit codes:
+Both checkers accept `-b` / `-PhpBins` to pin PHP binaries. The bash checker
+accepts `-f` to override the fixed-version mapping.
+
+## Sources and signals
+
+- **ProcessBehavior**: immediate children of PHP and web-server processes,
+  classified against a shell/tool allowlist. A snapshot only; short-lived
+  children can be missed. `FilterToToolAllowlist=Y` restricts output.
+- **AccessLogEvidence**: log lines containing `php2shell` or
+  `PHP_SESSION_UPLOAD_PROGRESS`. The method is not restricted, because PHP 8.4
+  can parse multipart input on non-POST methods. These are literal markers;
+  ordinary access logs usually omit request bodies.
+- **FpmErrorLogEvidence**: `Allowed memory size ... exhausted` and
+  `Session object destruction failed` lines from PHP/FPM error logs. Rows carry
+  `IsMemoryExhaustion`, `IsSessionDestructionFailure`, and
+  `HasUnknownLineZero`. Both patterns are nonspecific; judge density and
+  timestamps. OOM is common but not a mandatory footprint of every attack path.
+- **SessionFileEvidence**: `sess_*` files containing `upload_progress_` plus a
+  PHP opener (`<?php`, case-insensitive, or `<?=`) or a serialized-object
+  marker (`O:` / `C:`, including nested and pipeless forms). Co-occurrence is
+  suspicious, not proof of execution.
+- **RecentPhpFiles**: `.php` files scoring at least two of eight pattern
+  families, or modified inside the window. The score counts families, not
+  probability. The pair `request_input` plus `callback_vectors` alone is
+  demoted to WEAK based on WordPress core calibration; other pairs can still be
+  legitimate application code.
+- **PHPInstallations**: discovered runtimes, each probed with `php -n -v` under
+  a hard `MaxProbes` budget. Only a zero-exit probe can issue a verdict. A
+  version read from a directory name is an unverified `PathHint`.
+
+## Exit codes
+
+The checkers use the same exit semantics. The Velociraptor artifact emits rows
+and has no package-wide exit code.
 
 | Code | Meaning |
 |---|---|
-| 0 | No session-content or score >= 2 matches, no version below the official fixed version; weak findings may still be present |
-| 1 | Session-content or score >= 2 matches and/or a PHP version below the official fixed version, requiring review |
-| 2 | Assessment incomplete with no threshold match: scan errors, no existing directories scanned, or a PHP version that could not be determined |
+| 0 | No session-content or score >= 2 webroot match, and no version below the fixed threshold. Weak findings may still be present |
+| 1 | Session-content or score >= 2 webroot match and/or a PHP version below the fixed threshold |
+| 2 | Assessment incomplete with no threshold match: scan errors, no existing directory scanned, or an undetermined PHP version |
 
-A threshold match takes precedence over scan errors in the exit code; always inspect `ScanErrors` and coverage. Invalid dates also return 2. An undetermined PHP version is a coverage gap, not exposure evidence, so it maps to 2, never to 1 on its own.
+A threshold match takes precedence over scan errors. An undetermined version is
+a coverage gap, so it maps to 2, never to 1 on its own. Diff findings never
+change the exit code.
 
-## PHP version inventory and advisory status
+## Version verdicts and advisory status
 
-The version checks in both detection files compare **numerically**, component-wise. A lexicographic string comparison would misjudge e.g. 8.3.9 (below the fixed version) as patched because `"9" > "3"` as text.
+Versions are compared numerically, component by component. A string comparison
+would misjudge 8.3.9 as patched against 8.3.36.
 
-Advisory status, **confirmed against php.net and the php-src GHSAs on 2026-10-21 ~15:10 UTC**: php.net published the security release - **PHP 8.2.35, 8.3.36, 8.4.27 and 8.5.12 fix two critical unauthenticated-RCE vulnerabilities, CVE-2026-109618 ([OOM corruption](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)) and CVE-2026-109619 ([stale global state](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp))**; see also the [php.net release announcement](https://www.php.net/archive/2026.php). The fixed-version mapping used here (8.2.35, 8.3.36, 8.4.27, 8.5.12) matches the published values exactly, and the checkers label the mapping **official** while still instructing verification against the advisory before acting on any verdict. The version-verdict JSON field is `FixedVersion` in the checkers; the artifact surfaces the configured mapping as `ConfiguredFixedVersion` (and the parameter is `FixedVersions`). Their values are the official thresholds. php.net also published minimal source backports for PHP 7.4/8.0/8.1 branches, and notes the risk is highest for mod_php, where an unauthenticated request can trigger the vulnerability before any application code runs. The affected range is widely reported as PHP 5.4 through 8.5.11 (session.upload_progress shipped in 5.4); PHP publishes fixed versions only for supported branches plus the 7.4/8.0/8.1 backports, so the checkers treat any branch without a mapping as **manual review** rather than clearing it.
+The official fixed thresholds, confirmed against php.net and the php-src GHSAs
+on 2026-10-21, are 8.2.35, 8.3.36, 8.4.27, and 8.5.12. A verdict applies only
+to CVE-2026-109618 and CVE-2026-109619. It does not assess other PHP
+vulnerabilities or prior compromise.
 
-**Distro backports:** Debian, Ubuntu and RHEL often ship the security fix as a patch without bumping the upstream version, so a build reporting 8.3.35 (or similar) may already be fixed. A below-fixed verdict on a distro PHP must be confirmed against the package changelog before acting: `apt changelog php8.3-fpm | grep -E '109618|109619'` or `rpm -q --changelog php-fpm | grep -E '109618|109619'`.
+Three caveats matter when interpreting a patched verdict:
 
-## Interpretation and coverage
+- **CVE-2026-115560** (php.net informational advisory, 2026-10-23) is not yet
+  patched. It requires upload progress enabled, a configured `php_binary` or
+  `php_serialize` handler, and an application switch to `php` via `ini_set()`
+  before `session_start()`. PHP recommends `session.upload_progress.enabled=0`
+  until the next bugfix release; applications that never switch handlers at
+  runtime may keep it enabled.
+- **php-src PR 22113** (session fixation via a form-supplied session ID, and
+  the serializer leak) is open, not merged into these releases.
+- **Chain A** (upload-progress filename stored in a session file, then included
+  through an application LFI) is reported to work on patched PHP. Session-file
+  evidence remains relevant on a patched host.
 
-Paths are defaults, not complete discovery. Adjust them for each deployment and use sufficient read permissions. The PowerShell script does not collect process or access-log evidence. Review Velociraptor collection errors separately from result rows.
+Distributions often backport fixes without changing the upstream version.
+Confirm a below-threshold verdict against the package changelog:
 
-The Velociraptor file-content checks read at most 1 MB per session file and 500 KB per PHP file; later content can be missed. The PowerShell checks read the whole file. Neither decodes obfuscation nor parses PHP syntax. Only `.php` files are included in the webroot hunt. Compressed logs are excluded. Deleted files, expired logs, and activity outside the collected paths are not covered. Session content and log lines may contain sensitive data; handle collection results accordingly.
+```bash
+apt changelog php8.3-fpm | grep -E '109618|109619'
+rpm -q --changelog php-fpm | grep -E '109618|109619'
+```
 
-Session directories are scanned non-recursively: only top-level `sess_*` files in each configured directory are examined (matching PHP's default flat `session.save_path` layout). Nested directory structures such as PHP's `N`-level `session.save_path` moduli (`/tmp/sessions/N/sess_...`) are not traversed; configure each leaf directory explicitly.
+A malformed mapping value, or one from a different branch, routes to manual
+review and is surfaced as `ConfiguredFixedVersion`. Over budget, nothing
+executes and every candidate reports `budget exceeded - unverified`.
 
-Additional known limitations in the bash checker: guaranteed-valid JSON output requires `iconv` (absent → invalid-UTF-8 filenames can produce invalid JSON); `--fixed-versions` override major components are not bounds-checked (an explicitly malformed override can wrap comparison arithmetic); a recently-modified **empty** `.php` file is reported by the bash checker but omitted by the PowerShell one (parity gap, thresholds unaffected).
+## Coverage limits
+
+- Default paths are not complete discovery. Adjust them per deployment.
+- Velociraptor reads at most 1 MB per session file and 500 KB per PHP file.
+  The PowerShell checker reads whole files.
+- Access logs usually omit request bodies, so body markers can be invisible.
+- Compressed logs are skipped. Access and error log output is capped at 10000
+  rows, and one chatty log can crowd out others in the same collection.
+- Session directories are scanned non-recursively; configure each leaf
+  directory of a nested `session.save_path`.
+- Process results are a snapshot, not a history.
+- Neither checker decodes obfuscation or parses PHP syntax. Only `.php` files
+  are scored in the webroot hunt.
+- Response-side indicators such as an anomalous `PHPSESSID` cookie require
+  local response-header logs and are documented in `POST-COMPROMISE.md`; no
+  default threshold is shipped.
+- Container-internal PHP, macOS, FreeBSD, and real cPanel/Plesk/Remi layouts
+  are outside validated coverage. `AdditionalBinaryGlobs` covers custom
+  layouts.
+- The bash checker's guaranteed-valid JSON assumes `iconv` is installed.
 
 ## Validation
 
-The detections were validated three ways before release: platform regression
-suites running the real checkers against stubbed fixtures, an isolated cloud
-lab A/B matrix (vulnerable 8.3.35 vs patched 8.3.36 across Apache/FPM and
-session-cleanup settings, 10/10 expected-vs-actual assertions), and eleven
-rounds of independent adversarial review converging on a SOLID verdict for
-both the detection logic and the validation claims. The method, scope, and
-final results are described in **[VALIDATION-METHOD.md](VALIDATION-METHOD.md)**.
+The v1.0.0 content was validated three ways: platform regression suites
+against stubbed fixtures, an isolated AWS A/B matrix (8.3.35 versus 8.3.36
+across Apache/FPM and cleanup settings), and eleven rounds of independent
+adversarial review that converged on SOLID for the detection logic and the
+validation claims. See `VALIDATION-METHOD.md` for scope, results, evidence,
+and the 2026-10-24 coverage update.
+
+## References
+
+- [php.net security archive](https://www.php.net/archive/2026.php)
+- [GHSA-w8hw-w9fx-j79w](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)
+- [GHSA-6wmf-4rv5-p3rp](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp)
+- [php-src PR 22113](https://github.com/php/php-src/pull/22113)
+- [ikow/php2shell-poc](https://github.com/ikow/php2shell-poc)
+- [Generic.Applications.PHPInventory](https://docs.velociraptor.app/exchange/artifacts/pages/phpinventory/)

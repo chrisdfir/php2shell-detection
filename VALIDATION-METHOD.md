@@ -187,3 +187,45 @@ POST-COMPROMISE.md were added after the lab validation and are covered by
 the regression suites only. Container-internal PHP runtimes, macOS and
 FreeBSD hosts, and real cPanel/Plesk/Remi servers are outside validated
 coverage; the `AdditionalBinaryGlobs` parameter exists for such layouts.
+
+## Coverage update 2026-10-24 (v1.1.0)
+
+Intel reviewed after the v1.0.0 record:
+
+- php.net published an informational advisory on 2026-10-23 for
+  CVE-2026-115560, still unpatched. It requires upload progress enabled,
+  a configured `php_binary` or `php_serialize` handler, and an
+  application switch to `php` via `ini_set()` before `session_start()`.
+  PHP recommends disabling upload progress until the next bugfix release.
+- php-src PR 22113 (session fixation via a form-supplied session ID and
+  the serializer leak) is open, not merged into 8.2.35, 8.3.36, 8.4.27,
+  or 8.5.12.
+- The public PoC patch analysis reports Chain A (session injection plus
+  an application LFI) working on patched PHP, and lists
+  `fatal_error_backtraces` (PHP 8.5) and OPcache shared memory as
+  additional CVE-2026-109619 arms.
+- PHP 8.4 `request_parse_body()` parses multipart input on GET, PUT,
+  PATCH, and DELETE, so POST-only log rules are bypassable.
+- Response-side indicators were published: anomalous `PHPSESSID` cookie
+  length (heap disclosure) and `Session object destruction failed`.
+
+Detection changes made in response:
+
+- `AccessLogEvidence` no longer requires POST.
+- `FpmErrorLogEvidence` also matches `Session object destruction failed`
+  and classifies rows with `IsMemoryExhaustion`,
+  `IsSessionDestructionFailure`, and `HasUnknownLineZero`.
+- Session-content detection recognizes the `<?=` opener in all three
+  implementations.
+- Version verdicts are explicitly scoped to CVE-2026-109618 and
+  CVE-2026-109619; thresholds and exit semantics are unchanged.
+
+Regression results on 2026-10-24 (Windows runner): bash 30 passed, 0
+failed, 3 explicit `chmod` skips; PowerShell 36 passed, 0 failed, 1
+YAML-module skip. The updated artifact SHA-256 is
+`6B9F48424743B4B23A515E8BDCE84D22663869507A224D670E0394A2137FFCE2`.
+
+Still unvalidated: end-to-end non-POST multipart collection, the PHP 8.5
+fatal-backtrace arm, detection of the CVE-2026-115560 runtime handler
+switch, and a response-cookie threshold. The v1.0.0 record above is
+preserved; the new hash supersedes it for v1.1.0.
