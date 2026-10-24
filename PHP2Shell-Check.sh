@@ -280,6 +280,7 @@ for bin in "${php_bins[@]:-}"; do
         fi
     else
         add_error "php binary not executable: $bin"
+        version_undetermined=1
         continue
     fi
 
@@ -288,6 +289,9 @@ for bin in "${php_bins[@]:-}"; do
         version_undetermined=1; marker='?'
     elif [[ -z $fixed ]]; then
         status="branch $branch - no official fixed version (EOL or unrecognized branch); manual review"
+        version_undetermined=1; marker='?'
+    elif [[ ${fixed%.*} != "$branch" ]]; then
+        status="configured fixed version $fixed is for branch ${fixed%.*}, not $branch - manual review"
         version_undetermined=1; marker='?'
     elif ver_lt "$ver" "$fixed"; then
         status="below official fixed version $fixed - exposure indicator for CVE-2026-109618/109619; confirm against the vendor advisory"
@@ -301,6 +305,7 @@ for bin in "${php_bins[@]:-}"; do
 done
 if ! (( ${#php_bins[@]} )); then
     info 'No PHP binary found on PATH or common locations - version inventory skipped.'
+    version_undetermined=1
 fi
 
 # --- 1. Session file suspicious-content scan -----------------------------------------------
@@ -463,23 +468,29 @@ if [[ -n $DIFF_ARG ]]; then
         root=${root%/}; [[ -z $root ]] && root=/
         rootdir=${root%/}
         declare -A clean_sha=() clean_failed=()
+        find_err=$(mktemp) || add_error "web root diff: mktemp failed for clean-copy traversal: $clean"
         while IFS= read -r -d '' f; do
             rel=${f#"${cleandir}/"}
             csha=$(sha256sum "$f" 2>/dev/null | awk '{print $1}' | tr -d '\\')
             if [[ -z $csha ]]; then
                 warn "Web root diff: could not hash clean-copy file: $f"
                 diff_errors=$((diff_errors+1))
+                add_error "web root diff: could not hash clean-copy file: $f"
                 clean_failed["$rel"]=1
                 continue
             fi
             clean_sha["$rel"]=$csha
-        done < <(find -H "$clean" \( -type f -o -xtype f \) -print0 2>/dev/null)
+        done < <(find -H "$clean" \( -type f -o -xtype f \) -print0 2>"$find_err")
+        if [[ -s $find_err ]]; then add_error "web root diff traversal errors in $clean: $(head -n1 "$find_err")"; fi
+        rm -f "$find_err"
+        find_err=$(mktemp) || add_error "web root diff: mktemp failed for live-root traversal: $root"
         while IFS= read -r -d '' f; do
             rel=${f#"${rootdir}/"}
             lsha=$(sha256sum "$f" 2>/dev/null | awk '{print $1}' | tr -d '\\')
             if [[ -z $lsha ]]; then
                 warn "Web root diff: could not hash live file: $f"
                 diff_errors=$((diff_errors+1))
+                add_error "web root diff: could not hash live file: $f"
                 continue
             fi
             [[ -n ${clean_failed[$rel]+x} ]] && continue
@@ -489,7 +500,9 @@ if [[ -n $DIFF_ARG ]]; then
             if [[ $state == ADDED ]]; then added=$((added+1)); else modified=$((modified+1)); fi
             hit "[!] Web root diff ($state): ${rootdir}/$rel"
             diff_json+=("{\"Webroot\":\"$(json_escape "$root")\",\"Path\":\"$(json_escape "$rel")\",\"State\":\"$state\",\"SHA256\":\"$lsha\"}")
-        done < <(find -H "$root" \( -type f -o -xtype f \) -print0 2>/dev/null)
+        done < <(find -H "$root" \( -type f -o -xtype f \) -print0 2>"$find_err")
+        if [[ -s $find_err ]]; then add_error "web root diff traversal errors in $root: $(head -n1 "$find_err")"; fi
+        rm -f "$find_err"
         for rel in "${!clean_sha[@]}"; do
             [[ -f "${rootdir}/$rel" ]] || { missing=$((missing+1)); hit "[!] Web root diff (MISSING): ${rootdir}/$rel"; diff_json+=("{\"Webroot\":\"$(json_escape "$root")\",\"Path\":\"$(json_escape "$rel")\",\"State\":\"MISSING\",\"SHA256\":\"${clean_sha[$rel]}\"}"); }
         done

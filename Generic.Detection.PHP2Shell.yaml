@@ -119,11 +119,18 @@ sources:
           globs=split(string=AccessLogGlobs, sep=","))
       WHERE NOT IsDir AND NOT OSPath =~ "(?i)\\.(gz|zip|bz2|xz)$"
 
-      SELECT LogFile, Line
+      LET matched <= SELECT LogFile, Line
       FROM foreach(row=logs,
         query={ SELECT LogFile, Line FROM parse_lines(filename=LogFile) })
       WHERE Line =~ "(?i)php2shell|PHP_SESSION_UPLOAD_PROGRESS"
+
+      // count() over a materialized query emits running counts; the total
+      // is the maximum (ORDER BY N DESC LIMIT 1).
+      LET n_matched <= SELECT count() AS N FROM matched ORDER BY N DESC LIMIT 1
+
       // Cap so a chatty log cannot flood the collection; raise for deeper sweeps.
+      SELECT LogFile, Line, n_matched[0].N > 10000 AS PossiblyTruncated
+      FROM matched
       LIMIT 10000
 
   - name: FpmErrorLogEvidence
@@ -176,7 +183,7 @@ sources:
       // Object form matches pipe-delimited (php/php_serialize hybrid),
       // pipeless (php_serialize) and C: custom-serializer representations,
       // including objects nested inside arrays (a:1:{i:0;O:8:"…"}).
-      SELECT Dir, FullPath, Size, ModTime, Content,
+      LET session_matches <= SELECT Dir, FullPath, Size, ModTime, Content,
              Content =~ "(?i)<\\?(php|=)" AS HasPhpTag,
              Content =~ "(O|C):[0-9]+:\"" AS HasSerializedObject,
              Content =~ "upload_progress_" AS HasUploadProgress
@@ -186,6 +193,15 @@ sources:
                 FROM glob(globs=[_value + "/sess_*"])
                 WHERE NOT IsDir })
       WHERE HasUploadProgress AND (HasPhpTag OR HasSerializedObject)
+
+      LET n_session <= SELECT count() AS N FROM session_matches ORDER BY N DESC LIMIT 1
+
+      // ReadTruncated flags a session file larger than the 1 MB read limit;
+      // PossiblyTruncated flags an output cap of 10000 rows.
+      SELECT *, Size > 1000000 AS ReadTruncated,
+             n_session[0].N > 10000 AS PossiblyTruncated
+      FROM session_matches
+      LIMIT 10000
 
   - name: RecentPhpFiles
     query: |
@@ -224,11 +240,20 @@ sources:
                   read_file(filename=FullPath, length=500000) AS Content
                 FROM glob(globs=[_value + "/**/*.php"])
                 WHERE IsDir = FALSE })
-      SELECT *, if(condition=WebshellScore >= 2 AND MatchedPatterns != 'request_input,callback_vectors',
+      LET selected <= SELECT *, if(condition=WebshellScore >= 2 AND MatchedPatterns != 'request_input,callback_vectors',
                    then='STRONG',
                    else='WEAK (heuristic: recent mtime only - review required)') AS Signal
       FROM scored
       WHERE WebshellScore >= 2 OR ModTime > cutoff
+
+      LET n_selected <= SELECT count() AS N FROM selected ORDER BY N DESC LIMIT 1
+
+      // ReadTruncated flags a PHP file larger than the 500 KB read limit;
+      // PossiblyTruncated flags an output cap of 10000 rows.
+      SELECT *, Size > 500000 AS ReadTruncated,
+             n_selected[0].N > 10000 AS PossiblyTruncated
+      FROM selected
+      LIMIT 10000
 
   - name: PHPInstallations
     query: |

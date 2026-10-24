@@ -102,6 +102,12 @@ if ($PhpBins -and @($PhpBins).Count -gt 0) {
 }
 $phpBins = @($resolvedBins | Where-Object { $_ } | Select-Object -Unique)
 foreach ($bin in $phpBins) {
+    if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) {
+        $scanErrors += "php binary not executable: $bin"
+        $versionUndetermined = $true
+        Write-Host ("[?] {0}  ->  php binary not executable - manual check required" -f $bin) -ForegroundColor Yellow
+        continue
+    }
     $verStr = $null
     # Timeout guard: a hung php -v must not stall fleet automation. The job
     # also reports the probe's exit code: a php -v that prints a version but
@@ -134,6 +140,10 @@ foreach ($bin in $phpBins) {
     } elseif (-not $fixed) {
         $status = "branch $branch - no official fixed version (EOL or unrecognized branch); manual review"
         $versionUndetermined = $true; $marker = '?'; $color = 'Yellow'
+    } elseif ((($fixed -split '\.')[0..1] -join '.') -ne $branch) {
+        $fixedBranch = (($fixed -split '\.')[0..1] -join '.')
+        $status = "configured fixed version $fixed is for branch $fixedBranch, not $branch - manual review"
+        $versionUndetermined = $true; $marker = '?'; $color = 'Yellow'
     } else {
         $cmp = $null
         try { $cmp = ([version]$ver -lt [version]$fixed) } catch { }
@@ -151,7 +161,10 @@ foreach ($bin in $phpBins) {
     Write-Host ("[{0}] {1}  ->  {2}" -f $marker, $bin, $status) -ForegroundColor $color
     $report.PhpVersions += [pscustomobject]@{ Binary = $bin; Version = $ver; Branch = $branch; FixedVersion = $fixed; Status = $status }
 }
-if (-not $phpBins) { Write-Host '[i] No PHP binary found on PATH or common locations - version inventory skipped.' }
+if (-not $phpBins) {
+    Write-Host '[i] No PHP binary found on PATH or common locations - version inventory skipped.'
+    $versionUndetermined = $true
+}
 
 # --- mtime heuristic window -----------------------------------------------------
 # Rolling last 7 days by default; -SinceDate overrides it.
@@ -263,7 +276,7 @@ if ($DiffAgainst) {
         $rootPath = (Resolve-Path -LiteralPath $root).Path
         if ($rootPath.Length -gt 3) { $rootPath = $rootPath.TrimEnd('\') }
         $cleanSha = @{}; $cleanFailed = @{}
-        foreach ($f in Get-ChildItem -LiteralPath $cleanRoot -Recurse -File -Force -ErrorAction SilentlyContinue) {
+        foreach ($f in Get-ChildItem -LiteralPath $cleanRoot -Recurse -File -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors) {
             $rel = $f.FullName.Substring($cleanRoot.Length).TrimStart('\')
             $h = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
             if (-not $h) {
@@ -274,7 +287,7 @@ if ($DiffAgainst) {
             }
             $cleanSha[$rel] = $h
         }
-        foreach ($f in Get-ChildItem -LiteralPath $rootPath -Recurse -File -Force -ErrorAction SilentlyContinue) {
+        foreach ($f in Get-ChildItem -LiteralPath $rootPath -Recurse -File -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors) {
             $liveSha = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
             if (-not $liveSha) {
                 Write-Warning "Web root diff: could not hash live file: $($f.FullName)"
@@ -297,7 +310,10 @@ if ($DiffAgainst) {
         }
     }
     if ($added -or $modified -or $missing) { Write-Host ("[i] Web root diff: {0} added, {1} modified, {2} missing." -f $added, $modified, $missing) }
-    if ($diffErrors) { Write-Warning ("Web root diff: {0} file(s) could not be hashed and were excluded from the comparison." -f $diffErrors) }
+    if ($diffErrors) {
+        Write-Warning ("Web root diff: {0} file(s) could not be hashed and were excluded from the comparison." -f $diffErrors)
+        $scanErrors += ("Web root diff: {0} file(s) could not be hashed and were excluded from the comparison." -f $diffErrors)
+    }
 }
 
 # --- Summary ---------------------------------------------------------------------
