@@ -225,6 +225,15 @@ failed, 3 explicit `chmod` skips; PowerShell 36 passed, 0 failed, 1
 YAML-module skip. The updated artifact SHA-256 is
 `6B9F48424743B4B23A515E8BDCE84D22663869507A224D670E0394A2137FFCE2`.
 
+Focused artifact re-validation on the AWS workbench (AL2023, SSM only,
+2026-10-24): `vrm artifacts verify` returned 0, and one scoped collection
+with `EnableProbing=N` returned 12/12 expected results. The checks covered
+GET and POST access markers, marker-free exclusion, OOM with and without
+`in Unknown on line 0`, session-destruction classification, unrelated
+memory exclusion, `<?=` and `<?PHP` session rows, and benign
+upload-progress exclusion. Evidence is under
+`s3://php2shell-evidence-d63bfbc3bcb9ee837200948705/2026-10-24/v1.1.0/`.
+
 Still unvalidated: end-to-end non-POST multipart collection, the PHP 8.5
 fatal-backtrace arm, detection of the CVE-2026-115560 runtime handler
 switch, and a response-cookie threshold. The v1.0.0 record above is

@@ -28,6 +28,7 @@
 
 - bash: 30 passed, 0 failed, 3 explicit chmod skips (Windows runner).
 - PowerShell: 36 passed, 0 failed, 1 YAML-module skip.
+- AWS workbench: artifact verify rc=0; focused collection 12/12 checks.
 
 ## v1.0.0 (2026-10-22)
 
