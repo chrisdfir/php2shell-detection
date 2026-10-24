@@ -6,9 +6,11 @@
     Standalone triage for admins - no Velociraptor required. This is community
     detection content: it looks for artifacts and inventories PHP versions.
     Checks:
-      0. PHP installations and versions, compared NUMERICALLY against a
-         official fixed-version mapping (confirmed 2026-10-21; still a lead
-         to review, not a vendor verdict - see README "PHP version inventory")
+      0. PHP installations and versions, compared NUMERICALLY against the
+         official fixed-version thresholds for CVE-2026-109618/109619
+         (confirmed 2026-10-21; still a lead to review, not a vendor verdict,
+         and not an assessment of CVE-2026-115560 or other vulnerabilities -
+         see README "PHP version inventory")
       1. Session files containing PHP tags or serialized objects
          (suspicious-content scan; indicators for review, not proof of exploitation)
       2. .php files in web roots scored on webshell-indicator CONTENT, with a
@@ -139,10 +141,10 @@ foreach ($bin in $phpBins) {
             $status = 'version string could not be parsed - manual check required'
             $versionUndetermined = $true; $marker = '?'; $color = 'Yellow'
         } elseif ($cmp) {
-            $status = "below official fixed version $fixed - exposure indicator; confirm against the vendor advisory"
+            $status = "below official fixed version $fixed - exposure indicator for CVE-2026-109618/109619; confirm against the vendor advisory"
             $vulnerableVersion = $true; $marker = '!!'; $color = 'Yellow'
         } else {
-            $status = "at or above official fixed version $fixed"
+            $status = "at or above official fixed version $fixed for CVE-2026-109618/109619 (other vulnerabilities not assessed)"
             $marker = 'ok'; $color = 'Green'
         }
     }
@@ -174,7 +176,8 @@ foreach ($dir in $SessionPaths | Where-Object { $_ } | Select-Object -Unique) {
         if ($content -cmatch 'upload_progress_') {
             # Markers case-SENSITIVE (PHP writes upload_progress_/O:/C: tokens
             # lowercase); PHP TAGS case-INSENSITIVE (the language allows <?PHP).
-            $hasPhp = $content -imatch '<\?php'
+            # <?= is an executable opener.
+            $hasPhp = $content -imatch '<\?(php|=)'
             $hasObj = $content -cmatch '(O|C):\d+:"'
             if ($hasPhp -or $hasObj) {
                 Write-Host ("[!!] Session file contains suspicious content (php_tag={0} serialized_obj={1}) - review required, not confirmation of exploitation: {2}" -f $hasPhp, $hasObj, $_.FullName) -ForegroundColor Red

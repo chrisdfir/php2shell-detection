@@ -4,12 +4,13 @@ description: |
    Hunt for suspicious PHP-related process behavior, request markers,
    session-file content, possible webshells, and a PHP version inventory.
    Matches require investigation; they do not establish exploitation, a
-   particular CVE, or compromise. Version verdicts compare against an
-   official fixed-version mapping (confirmed 2026-10-21 against the php.net
-   advisory and php-src GHSA advisories); still re-verify against future
-   advisories before acting on verdicts. Process results are a snapshot. File and log
-   coverage depends on configured paths, permissions, retention, and the read
-   limits below.
+   particular CVE, or compromise. Version verdicts compare against the
+   official fixed-version thresholds for CVE-2026-109618 and CVE-2026-109619
+   (confirmed 2026-10-21 against php.net and the php-src GHSAs). They do not
+   assess other PHP vulnerabilities, including CVE-2026-115560, or prior
+   compromise. Re-verify against current advisories before acting. Process
+   results are a snapshot. File and log coverage depends on configured paths,
+   permissions, retention, and the read limits below.
 
 reference:
   - https://www.php.net/archive/2026.php
@@ -40,7 +41,7 @@ parameters:
     description: Access log globs (comma-separated); markers must be present in logged fields
     default: "/var/log/apache2/*access*,/var/log/nginx/*access*,/var/log/httpd/*access*,C:/inetpub/logs/LogFiles/**/*.log"
   - name: ErrorLogGlobs
-    description: FPM/PHP error-log globs (comma-separated) scanned for Allowed-memory-size fatal errors, nonspecific PHP memory-exhaustion evidence associated with the php2shell trigger. Compressed logs (.gz etc.) are skipped; point at decompressed copies for deep sweeps.
+    description: FPM/PHP error-log globs (comma-separated) scanned for Allowed-memory-size fatal errors and session-destruction failures, nonspecific PHP fatal-error evidence associated with php2shell paths. Compressed logs (.gz etc.) are skipped; point at decompressed copies for deep sweeps.
     default: "/var/log/php*fpm*.log*,/var/log/php*fpm/*.log*,/var/log/php-fpm/*.log*,/var/log/apache2/*error*,/var/log/httpd/*error*,/var/log/nginx/*error*.log*"
   - name: SinceDate
     type: timestamp
@@ -112,6 +113,8 @@ sources:
     query: |
       // Marker strings can be forged and may occur in benign research traffic.
       // Ordinary access logs generally do not contain multipart request bodies.
+      // The method is not restricted: PHP 8.4 request_parse_body() can parse
+      // multipart input on GET, PUT, PATCH and DELETE as well as POST.
       LET logs = SELECT OSPath AS LogFile FROM glob(
           globs=split(string=AccessLogGlobs, sep=","))
       WHERE NOT IsDir AND NOT OSPath =~ "(?i)\\.(gz|zip|bz2|xz)$"
@@ -119,42 +122,51 @@ sources:
       SELECT LogFile, Line
       FROM foreach(row=logs,
         query={ SELECT LogFile, Line FROM parse_lines(filename=LogFile) })
-      WHERE Line =~ "\\bPOST\\b"
-        AND Line =~ "(?i)php2shell|PHP_SESSION_UPLOAD_PROGRESS"
+      WHERE Line =~ "(?i)php2shell|PHP_SESSION_UPLOAD_PROGRESS"
       // Cap so a chatty log cannot flood the collection; raise for deeper sweeps.
       LIMIT 10000
 
   - name: FpmErrorLogEvidence
     query: |
-      // NONSPECIFIC PHP memory-exhaustion evidence. The php2shell exploit is
-      // reached through a PHP fatal error: the request exhausts memory
-      // before application code runs, so the worker logs "Allowed memory
-      // size ... exhausted". A burst of those in FPM/error logs around the
-      // exploitation window is CONSISTENT with the trigger (cf. the
-      // laracraft triage script and Searchlight Cyber's OOM-based remote
-      // detection, see reference) - but the pattern matches ANY PHP memory
-      // exhaustion, so density alone never establishes an attack. A handful
-      // of OOM fatals is normal on busy apps - judge DENSITY and timestamps,
-      // not single lines. Compressed logs are skipped (see parameter).
-      // Trade-offs: all matching lines are materialized to compute the
-      // total, and a very large log with few matches is still scanned in
-      // full (bytes scanned are not bounded by the output cap); output is
-      // capped at 10000 rows with PossiblyTruncated set when the cap bit.
+      // NONSPECIFIC PHP fatal-error evidence. The php2shell paths are
+      // reached through a PHP fatal error: OOM during multipart parsing
+      // (before application code runs) logs "Allowed memory size ...
+      // exhausted", and session-store cleanup failures can log "Session
+      // object destruction failed". A burst of either around the exploitation
+      // window is CONSISTENT with the trigger (cf. the laracraft triage script
+      // and Searchlight Cyber's OOM-based remote detection, see reference) -
+      // but both patterns are nonspecific, so density alone never establishes
+      // an attack. OOM is not a mandatory footprint of every php2shell path.
+      // A handful is normal on busy apps - judge DENSITY and timestamps, not
+      // single lines. IsMemoryExhaustion, IsSessionDestructionFailure and
+      // HasUnknownLineZero classify each row; the last marks OOM emitted
+      // during SAPI parsing ("in Unknown on line 0"), not user code.
+      // Compressed logs are skipped (see parameter). Trade-offs: all matching
+      // lines are materialized to compute the total, and a very large log
+      // with few matches is still scanned in full (bytes scanned are not
+      // bounded by the output cap); output is capped at 10000 rows with
+      // PossiblyTruncated set when the cap bit.
       LET elogs = SELECT OSPath AS LogFile FROM glob(
           globs=split(string=ErrorLogGlobs, sep=","))
       WHERE NOT IsDir AND NOT OSPath =~ "(?i)\\.(gz|zip|bz2|xz)$"
       GROUP BY LogFile
 
-      LET matched <= SELECT LogFile, Line
+      LET matched <= SELECT LogFile, Line,
+             Line =~ "Allowed memory size.*exhausted" AS IsMemoryExhaustion,
+             Line =~ "Session object destruction failed" AS IsSessionDestructionFailure,
+             Line =~ "Allowed memory size.*exhausted"
+               AND Line =~ "in Unknown on line 0\\b" AS HasUnknownLineZero
       FROM foreach(row=elogs,
         query={ SELECT LogFile, Line FROM parse_lines(filename=LogFile) })
       WHERE Line =~ "Allowed memory size.*exhausted"
+         OR Line =~ "Session object destruction failed"
 
       // count() over a materialized query emits running counts; the total
       // is the maximum (ORDER BY N DESC LIMIT 1).
       LET n_matched <= SELECT count() AS N FROM matched ORDER BY N DESC LIMIT 1
 
-      SELECT LogFile, Line, n_matched[0].N > 10000 AS PossiblyTruncated
+      SELECT LogFile, Line, IsMemoryExhaustion, IsSessionDestructionFailure,
+             HasUnknownLineZero, n_matched[0].N > 10000 AS PossiblyTruncated
       FROM matched
       LIMIT 10000
 
@@ -165,7 +177,7 @@ sources:
       // pipeless (php_serialize) and C: custom-serializer representations,
       // including objects nested inside arrays (a:1:{i:0;O:8:"…"}).
       SELECT Dir, FullPath, Size, ModTime, Content,
-             Content =~ "(?i)<\\?php" AS HasPhpTag,
+             Content =~ "(?i)<\\?(php|=)" AS HasPhpTag,
              Content =~ "(O|C):[0-9]+:\"" AS HasSerializedObject,
              Content =~ "upload_progress_" AS HasUploadProgress
       FROM foreach(row=split(string=SessionPaths, sep=","),
@@ -399,8 +411,8 @@ sources:
                      AND split(string=fixed[Branch], sep_string=".")[0] = split(string=Branch, sep_string=".")[0]
                      AND split(string=fixed[Branch], sep_string=".")[1] = split(string=Branch, sep_string=".")[1],
                    then=if(condition=key(v=ObservedVersion) < key(v=fixed[Branch]),
-                           then="version below official fixed version - check distro backports and the vendor advisory",
-                           else="version at or above official fixed version"),
+                           then="version below official fixed version for CVE-2026-109618/109619 - check distro backports and the vendor advisory",
+                           else="version at or above official fixed version for CVE-2026-109618/109619 (other vulnerabilities not assessed)"),
                    else=if(condition=fixed[Branch],
                            then="configured fixed version invalid for this branch - manual review",
                            else="no official fixed version for this branch - manual review")),

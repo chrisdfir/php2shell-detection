@@ -6,9 +6,11 @@
 # Standalone triage for admins - no Velociraptor required. This is community
 # detection content: it looks for artifacts and inventories PHP versions.
 # Checks:
-#   0. PHP installations and versions, compared NUMERICALLY against a
-#      official fixed-version mapping (confirmed 2026-10-21; still a lead
-#      to review, not a vendor verdict - see README "PHP version inventory")
+#   0. PHP installations and versions, compared NUMERICALLY against the
+#      official fixed-version thresholds for CVE-2026-109618/109619
+#      (confirmed 2026-10-21; still a lead to review, not a vendor verdict,
+#      and not an assessment of CVE-2026-115560 or other vulnerabilities -
+#      see README "PHP version inventory")
 #   1. Session files containing PHP tags or serialized objects
 #      (suspicious-content scan; indicators for review, not proof of exploitation)
 #   2. .php files in web roots scored on webshell-indicator CONTENT, with a
@@ -288,10 +290,10 @@ for bin in "${php_bins[@]:-}"; do
         status="branch $branch - no official fixed version (EOL or unrecognized branch); manual review"
         version_undetermined=1; marker='?'
     elif ver_lt "$ver" "$fixed"; then
-        status="below official fixed version $fixed - exposure indicator; confirm against the vendor advisory"
+        status="below official fixed version $fixed - exposure indicator for CVE-2026-109618/109619; confirm against the vendor advisory"
         vulnerable_version=1; marker='!!'
     else
-        status="at or above official fixed version $fixed"
+        status="at or above official fixed version $fixed for CVE-2026-109618/109619 (other vulnerabilities not assessed)"
         marker='ok'
     fi
     hit "[$marker] $bin  ->  $status"
@@ -333,8 +335,9 @@ while IFS= read -r dir; do
         # including nested arrays (a:1:{i:0;O:8:"…"}) and pipeless php_serialize.
         has_php=0; grcP=0
         # PHP tags are case-insensitive in the language itself (<?PHP is valid);
-        # upload_progress_/O:/C: markers are lowercase-by-convention (sensitive).
-        grep -qiF '<?php' "$f" 2>/dev/null && has_php=1
+        # <?= is an executable opener. upload_progress_/O:/C: markers are
+        # lowercase-by-convention (case-sensitive).
+        grep -qiE '<\?(php|=)' "$f" 2>/dev/null && has_php=1
         grcP=$?
         has_obj=0; grcO=0
         grep -qE '(O|C):[0-9]+:"' "$f" 2>/dev/null && has_obj=1
