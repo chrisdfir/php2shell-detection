@@ -16,6 +16,7 @@ reference:
   - https://www.php.net/archive/2026.php
   - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
   - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+  - https://github.com/php/php-src/pull/22113
   - https://github.com/cyb3r-monk/Threat-Hunting-and-Detection/blob/main/Uncategorized/PHP2Shell.md
   - https://docs.velociraptor.app/exchange/artifacts/pages/phpinventory/
   - https://laracraft.tech/en/blog/php2shell-were-you-hit-a-read-only-triage-script-for-your-server

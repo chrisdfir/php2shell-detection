@@ -7,8 +7,9 @@ from most reliable to least.
 
 ## 1. Compare against a known-good copy
 
-This finds more than any scan, because it does not depend on recognizing
-the shell at all.
+A trusted, deployment-matched baseline can identify changes that signature
+scans miss. It does not cover memory-only activity or changes outside the
+compared tree.
 
 - Rebuild the application from a trusted source (CI artifact, git tag,
   vendor package) into a separate folder. Diff it against the live web
@@ -136,8 +137,11 @@ Two facts worth keeping straight while you do this:
 If the host was exposed during the disclosure window, treat in-memory
 secrets as compromised regardless of what the scans find: the memory
 disclosure variant of this bug leaves almost nothing on disk. Rotate
-`APP_KEY` (keeping the old value in `APP_PREVIOUS_KEYS`), database
-credentials, API keys and any TLS keys living on the same box.
+`APP_KEY`, database credentials, API keys, and any TLS keys living on the
+same box using the application's incident-recovery procedure. Retaining an
+old key in `APP_PREVIOUS_KEYS` preserves some trust in that key; any
+temporary migration requirement needs explicit risk acceptance and an
+expiry.
 
 ## Practical sequence
 

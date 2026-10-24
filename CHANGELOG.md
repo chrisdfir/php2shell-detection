@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.2.0 (2026-10-24)
+
+### Detection
+
+- Standalone checkers reject a fixed-version mapping from the wrong branch,
+  matching the artifact.
+- A missing or non-executable pinned PHP binary is a coverage gap (exit 2).
+- Web-root diff traversal and hash failures are recorded in `ScanErrors`.
+- `AccessLogEvidence` exposes `PossiblyTruncated`. `SessionFileEvidence`
+  and `RecentPhpFiles` expose `ReadTruncated` and `PossiblyTruncated`.
+
+### Documentation
+
+- Added `SUPPORTED.md` with supported, partial, and unsupported environments
+  and telemetry prerequisites.
+- Scoped production claims in README and VALIDATION-METHOD.
+- Corrected baseline-diff and `APP_KEY` retention wording in
+  POST-COMPROMISE.md.
+
+### Validation
+
+- bash: 32 passed, 0 failed, 3 explicit chmod skips.
+- PowerShell: 38 passed, 0 failed, 1 YAML-module skip.
+
 ## v1.1.0 (2026-10-24)
 
 ### Detection

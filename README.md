@@ -1,10 +1,12 @@
 # PHP2Shell Detection
 
-Host-side detection for CVE-2026-109618 and CVE-2026-109619, the PHP
-`session.upload_progress` remote code execution vulnerabilities. The content
-inventories PHP versions, collects session-file and webroot evidence, and hunts
-process and log artifacts. Findings are investigation leads, not proof of
-exploitation, and no matches do not establish that a host is uncompromised.
+Host-side triage and hunting content for indicators associated with
+CVE-2026-109618 and CVE-2026-109619, the PHP `session.upload_progress` remote
+code execution vulnerabilities. The content inventories PHP versions, collects
+session-file and webroot evidence, and hunts process and log artifacts. It is
+not a comprehensive exploit detector or a continuous monitoring service.
+Findings are investigation leads, not proof of exploitation, and no matches do
+not establish that a host is uncompromised.
 
 Author: Chris DiSalle (@chrisdfir)
 
@@ -16,6 +18,7 @@ Author: Chris DiSalle (@chrisdfir)
 | `PHP2Shell-Check.ps1` | Standalone Windows scan: session files, webroot, version inventory, known-good diff |
 | `PHP2Shell-Check.sh` | Linux counterpart of the PowerShell checker; JSON report on stdout |
 | `POST-COMPROMISE.md` | Ordered investigation guide for a known-compromised host |
+| `SUPPORTED.md` | Supported, partial, and unsupported environments and telemetry |
 | `VALIDATION-METHOD.md` | Validation scope, results, evidence, and known limits |
 | `CHANGELOG.md` | Release history |
 
@@ -82,8 +85,8 @@ and has no package-wide exit code.
 
 | Code | Meaning |
 |---|---|
-| 0 | No session-content or score >= 2 webroot match, and no version below the fixed threshold. Weak findings may still be present |
-| 1 | Session-content or score >= 2 webroot match and/or a PHP version below the fixed threshold |
+| 0 | No session-content finding, no STRONG webroot finding (score >= 2 excluding the exact `request_input` + `callback_vectors` pair), and no version below the fixed threshold. Weak findings may still be present |
+| 1 | Session-content finding, STRONG webroot finding, and/or a PHP version below the fixed threshold |
 | 2 | Assessment incomplete with no threshold match: scan errors, no existing directory scanned, or an undetermined PHP version |
 
 A threshold match takes precedence over scan errors. An undetermined version is
@@ -100,7 +103,7 @@ on 2026-10-21, are 8.2.35, 8.3.36, 8.4.27, and 8.5.12. A verdict applies only
 to CVE-2026-109618 and CVE-2026-109619. It does not assess other PHP
 vulnerabilities or prior compromise.
 
-Three caveats matter when interpreting a patched verdict:
+Three caveats matter when interpreting an at-or-above-threshold version result:
 
 - **CVE-2026-115560** (php.net informational advisory, 2026-10-23) is not yet
   patched. It requires upload progress enabled, a configured `php_binary` or
@@ -122,9 +125,12 @@ apt changelog php8.3-fpm | grep -E '109618|109619'
 rpm -q --changelog php-fpm | grep -E '109618|109619'
 ```
 
-A malformed mapping value, or one from a different branch, routes to manual
-review and is surfaced as `ConfiguredFixedVersion`. Over budget, nothing
-executes and every candidate reports `budget exceeded - unverified`.
+The Velociraptor artifact rejects malformed and branch-mismatched mapping
+values and surfaces the configured value as `ConfiguredFixedVersion`. The
+standalone checkers also treat a wrong-branch mapping as a coverage gap, but
+their override parsing is less strict than the artifact; verify overrides by
+hand. Over budget, nothing executes and every candidate reports `budget
+exceeded - unverified`.
 
 ## Coverage limits
 
@@ -143,18 +149,27 @@ executes and every candidate reports `budget exceeded - unverified`.
   local response-header logs and are documented in `POST-COMPROMISE.md`; no
   default threshold is shipped.
 - Container-internal PHP, macOS, FreeBSD, and real cPanel/Plesk/Remi layouts
-  are outside validated coverage. `AdditionalBinaryGlobs` covers custom
-  layouts.
+  are outside validated coverage. `AdditionalBinaryGlobs` extends artifact
+  binary discovery only; it does not discover application roots, session
+  stores, logs, or container namespaces, and it does not establish support
+  for an unvalidated platform.
 - The bash checker's guaranteed-valid JSON assumes `iconv` is installed.
 
 ## Validation
 
-The v1.0.0 content was validated three ways: platform regression suites
-against stubbed fixtures, an isolated AWS A/B matrix (8.3.35 versus 8.3.36
-across Apache/FPM and cleanup settings), and eleven rounds of independent
-adversarial review that converged on SOLID for the detection logic and the
-validation claims. See `VALIDATION-METHOD.md` for scope, results, evidence,
-and the 2026-10-24 coverage update.
+The content was evaluated three complementary ways: platform regression
+suites against stubbed fixtures, an isolated AWS A/B matrix (8.3.35 versus
+8.3.36 across Apache/FPM and cleanup settings), and eleven rounds of
+independent adversarial review. The final review assessment was SOLID within
+the reviewed scope. That assessment covers detection logic and documentation;
+it is not evidence of fleet-scale performance, field precision, or
+comprehensive detection recall.
+
+Supervised incident-response triage is supported now. Fleet-wide continuous
+hunting is not yet production-validated: the collection contract, measured
+resource budgets, holdout false-positive calibration, and a multi-host pilot
+are still in progress. See `SUPPORTED.md` for the environment matrix and
+`VALIDATION-METHOD.md` for evidence and limits.
 
 ## References
 

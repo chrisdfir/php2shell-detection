@@ -93,7 +93,7 @@ discovery-only), and path-hint extraction on versioned Windows layouts.
 
 ### Final artifact record
 
-The submitted artifact is `Generic.Detection.PHP2Shell.yaml` at commit
+The historical v1.0.0 artifact record is `Generic.Detection.PHP2Shell.yaml` at commit
 `b8aab48`, SHA-256
 `685A8AA77CD621FCCEEBEB5BAC63E2B402F79B2CFCF168FD79EA944661583266`
 (byte-identical to the tree at commit `3869633`; `b8aab48` changed only
@@ -237,4 +237,27 @@ upload-progress exclusion. Evidence is under
 Still unvalidated: end-to-end non-POST multipart collection, the PHP 8.5
 fatal-backtrace arm, detection of the CVE-2026-115560 runtime handler
 switch, and a response-cookie threshold. The v1.0.0 record above is
-preserved; the new hash supersedes it for v1.1.0.
+preserved; the v1.2.0 hash supersedes it for current use.
+
+## Contract parity update 2026-10-24 (v1.2.0)
+
+Changes in this release:
+
+- The standalone checkers reject a fixed-version mapping from the wrong
+  branch, matching the artifact.
+- A missing or non-executable pinned PHP binary is a coverage gap (exit 2),
+  not a silent non-match.
+- Web-root diff traversal and hash failures are recorded in `ScanErrors`,
+  so an incomplete diff cannot look like a clean comparison.
+- `AccessLogEvidence` exposes `PossiblyTruncated`. `SessionFileEvidence`
+  and `RecentPhpFiles` expose `ReadTruncated` and `PossiblyTruncated`.
+
+Regression results on 2026-10-24 (Windows runner): bash 32 passed, 0
+failed, 3 explicit `chmod` skips; PowerShell 38 passed, 0 failed, 1
+YAML-module skip. Updated artifact SHA-256:
+`65963DE5DFD578A45079AF832441A4D6F8FB4FD55185CD3C80B3CC4B914E129C`.
+
+Readiness scope: supervised incident-response triage is supported now.
+Fleet-wide continuous hunting still requires measured collection budgets, a
+multi-host pilot, and a holdout false-positive calibration. The supported,
+partial, and unsupported combinations are recorded in `SUPPORTED.md`.
